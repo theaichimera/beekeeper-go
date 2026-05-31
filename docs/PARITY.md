@@ -1,0 +1,288 @@
+# Behavioral parity ledger — beekeeper-go vs Python beadkeeper
+
+This file records:
+
+1. The **test-by-test parity map** between Python `tests/test_*.py`
+   (133 tests) and the equivalent Go tests under
+   `cmd/bk/`, `internal/*/`, and `tools/diffharness/`.
+2. The **diff harness contract**: what we compare byte-for-byte,
+   what we deep-equal as JSON, and what we substring-match.
+3. The **accepted divergence ledger**: cross-language deltas the
+   harness ignores intentionally, with rationale.
+
+The Go tests run under `go test -race -count=1 ./...`; the diff
+harness runs under `go test ./tools/diffharness/...` with the
+Python `beadkeeper` on `PATH` (or `BEADKEEPER_PY=<path>`).
+
+---
+
+## 1. Comparison contract
+
+| Surface | What we compare | How |
+|---|---|---|
+| `doctor`, `board` text reports | byte-equivalent paths, severity, ordering, structure | byte-compare AFTER ANSI-strip + path normalization |
+| `doctor`, `board`, `guard *`, `lease list`, `merge-slot status`, `trunk-sync` `--json` | shape + values | parse both, run `reflect.DeepEqual` after key normalization |
+| Refusal paths (daemon-alive, divergent, dirty-tree, etc.) | exit code + required keyword in stderr/stdout | exit code MUST match exactly; messages substring-match (`daemon`, `divergent`, `dirty`/`working tree`/`index`, `conflict`) |
+| `--version` | both binaries exit 0 (text differs by design) | rc-only |
+
+The harness lives at `tools/diffharness/harness_test.go`. Build the Go
+binary up-front (out of any `t.TempDir()`), invoke both binaries
+on the same fixture corpus, and compare per the table above.
+
+## 2. Test-by-test map (133 Python → Go)
+
+Where one Go test covers multiple Python tests (e.g. a table-driven
+case), it's listed once with all Python sources. Where a Python test
+maps to no Go test 1:1 we record `not ported` with a reason.
+
+### `tests/test_filesync.py` (6 → 8)
+
+| Python | Go (`internal/filesync`) |
+|---|---|
+| `test_match_inside_synthetic_root` | `TestMatchInsideSyntheticRoot` |
+| `test_match_outside_returns_none` | `TestMatchOutsideReturnsNil` |
+| `test_longest_root_wins` | `TestLongestRootWins` |
+| `test_known_roots_reads_env` | `TestKnownRootsReadsEnv` |
+| `test_known_roots_skips_nonexistent` | `TestKnownRootsSkipsNonexistent` |
+| `test_label_for_well_known_names` | `TestLabelForWellKnownNames` |
+| (extra) | `TestMatchUsesLabelForWellKnownDropbox` |
+| (extra) | `TestKnownRootsDedups` |
+
+### `tests/test_guard.py` (6 → 6) — `internal/guard` ported in M4
+
+| Python | Go (`internal/guard`) |
+|---|---|
+| `test_clean_project_has_no_findings` | `TestCleanProjectHasNoFindings` |
+| `test_db_inside_filesync_is_red` | `TestDBInsideFilesyncIsRed` |
+| `test_plan_fix_refuses_while_daemon_alive` | `TestPlanFixRefusesWhileDaemonAlive` |
+| `test_plan_fix_dry_run_does_not_move` | `TestPlanFixDryRunDoesNotMove` |
+| `test_plan_fix_apply_moves_files` | `TestPlanFixApplyMovesFiles` |
+| `test_scan_paths_skips_heavy_dirs` | `TestScanPathsSkipsHeavyDirs` |
+
+### `tests/test_hooks.py` (6 → 6)
+
+| Python | Go (`internal/hooks`) |
+|---|---|
+| `test_install_writes_executable_hook` | `TestInstallWritesExecutableHook` |
+| `test_install_is_idempotent` | `TestInstallIsIdempotent` |
+| `test_install_refuses_foreign_hook` | `TestInstallRefusesForeignHook` |
+| `test_uninstall_only_removes_our_hook` | `TestUninstallOnlyRemovesOurHook` |
+| `test_prompt_indicator_renders_function` | `TestRenderPromptIndicator` |
+| `test_install_on_non_git_dir` | `TestInstallOnNonGitDir` |
+
+### `tests/test_cli.py` (7 → 7) — `cmd/bk`
+
+| Python | Go (`cmd/bk/cli_test.go`) |
+|---|---|
+| `test_cli_doctor_json_clean` | `TestCLIDoctorJSONClean` |
+| `test_cli_doctor_red_exits_two` | `TestCLIDoctorRedExitsTwo` |
+| `test_cli_guard_db_clean` | `TestCLIGuardDBClean` |
+| `test_cli_guard_db_detects_inside_sync` | `TestCLIGuardDBDetectsInsideSync` |
+| `test_cli_guard_db_fix_dry_run` | `TestCLIGuardDBFixDryRun` |
+| `test_cli_install_hooks_idempotent` | `TestCLIInstallHooksIdempotent` |
+| `test_cli_prompt_indicator` | `TestCLIPromptIndicator` |
+
+### `tests/test_daemons.py` (8 → 9)
+
+| Python | Go (`internal/daemons`) |
+|---|---|
+| `test_list_workspace_daemons_filters_by_workspace` | `TestListWorkspaceDaemonsFiltersByWorkspace` |
+| `test_duplicate_daemons_is_red` | `TestDuplicateDaemonsRed` |
+| `test_single_daemon_no_log_failures_is_clean` | `TestSingleHealthyNoLog_IsClean` |
+| `test_remote_helper_failures_is_red` | `TestRemoteHelperFailuresRed` |
+| `test_orphan_state_files_without_daemon_is_yellow` | `TestOrphanStateYellow` |
+| `test_doctor_red_on_duplicate_daemons` | `TestDuplicatesAreRedAtModuleLevel` (per-pkg signal) + doctor wiring covered transitively |
+| `test_doctor_red_on_log_remote_helper_failure` | `TestRemoteHelperFailureRedAtModuleLevel` (per-pkg signal) |
+| `test_scan_does_not_invoke_start_or_stop` | `TestScanDoesNotInvokeStartOrStop` |
+| (extra) | `TestRemoteHelperBelowThresholdIsSilent` |
+| (extra) | `TestNoOrphanWhenPidFilePresent` |
+| (extra) | `TestCountRemoteHelperFailures` |
+| (extra) | `TestCountRemoteHelperFailuresMissing` |
+| (extra) | `TestScanAggregates` |
+
+### `tests/test_doctor.py` (14 → 14)
+
+| Python | Go (`internal/doctor/{doctor_test.go,wiring_test.go}`) |
+|---|---|
+| `test_healthy_project_is_green` | `TestHealthyProjectNotRed` |
+| `test_db_in_filesync_makes_doctor_red` | `TestDBInFilesyncRed` |
+| `test_dead_daemon_pid_is_red` | `TestStaleDaemonPIDRed` |
+| `test_dead_pid_red_even_when_bd_self_heals_pid_file` | `TestDeadPIDRedEvenWhenBdSelfHealsPidFile` |
+| `test_needs_manual_sync_is_red` | `TestNeedsManualSyncWithAlivePIDAlsoRed` (with-pid variant) |
+| `test_needs_manual_sync_without_pid_is_red` | `TestNeedsManualSyncWithoutPidRed` |
+| `test_five_consecutive_failures_without_pid_is_red` | `TestFiveFailuresRed` |
+| `test_one_consecutive_failure_without_pid_is_yellow` | `TestOneFailureYellow` |
+| `test_last_sync_age_over_24h_is_yellow` | `TestLastSyncAgeOver24hYellow` |
+| `test_bd_config_not_set_string_is_yellow` | `TestBdConfigNotSetStringIsYellow` |
+| `test_sync_branch_set_is_green` | `TestSyncBranchSetIsGreen` |
+| `test_empty_sync_branch_is_yellow` | `TestEmptySyncBranchYellow` |
+| `test_json_output_is_valid_and_has_worst` | `TestRenderJSONShape` |
+| `test_no_projects_renders_message` | `TestRenderTextEmptyAndProjects` |
+| (extra: exit code contract) | `TestExitCodeContract` (table-driven) |
+| (extra) | `TestAliveDaemonPIDGreen` + `TestMissingJSONLYellow` |
+
+### `tests/test_identity.py` (10 → 10)
+
+| Python | Go |
+|---|---|
+| `test_load_config_returns_canonical_and_aliases` | `internal/config.TestLoadIdentityConfigPresent` |
+| `test_load_config_missing_returns_none` | `internal/config.TestLoadIdentityConfigMissing` |
+| `test_canonical_only_is_clean` | `internal/identity.TestScanCanonicalOnlyIsClean` |
+| `test_mapped_alias_is_flagged_normalizable` | `internal/identity.TestScanFlagsAliasAndUnmapped` |
+| `test_unmapped_handle_is_flagged` | `internal/identity.TestScanFlagsAliasAndUnmapped` (same) + `TestScanNoConfigEmitsEverythingAsUnmapped` |
+| `test_normalize_dry_run_is_default_and_does_not_write` | `internal/identity.TestPlanNormalizeIsDryRun` + `TestNormalizeDryRunDoesNotWrite` |
+| `test_normalize_apply_rewrites_jsonl` | `internal/identity.TestNormalizeApplyRewritesJSONL` |
+| `test_normalize_refuses_when_daemon_alive` | `internal/identity.TestNormalizeApplyRefusesLiveDaemon` |
+| `test_doctor_yellow_on_identity_drift` | `internal/doctor.TestDoctorYellowOnIdentityDrift` |
+| `test_doctor_no_identity_check_without_config` | `internal/doctor.TestDoctorNoIdentityCheckWithoutConfig` |
+
+### `tests/test_lease.py` (16 → 17)
+
+| Python | Go (`internal/lease`) |
+|---|---|
+| `test_resolve_caller_returns_canonical_for_alias` | `TestResolveCallerAlias` |
+| `test_resolve_caller_passthrough_canonical` | `TestResolveCallerCanonical` |
+| `test_resolve_caller_raises_on_unmapped_handle` | `TestResolveCallerUnmappedErrs` |
+| `test_resolve_caller_raises_when_identity_not_configured` | `TestResolveCallerNoConfigErrs` |
+| `test_claim_unclaimed_issues_bd_update_call` | `TestClaimUnclaimedCallsBd` |
+| `test_claim_self_idempotent_does_not_re_call_bd` | `TestClaimSelfIdempotentNoCall` |
+| `test_claim_on_other_held_is_rejected` | `TestClaimByOtherIsConflict` |
+| `test_claim_refuses_when_daemon_alive` | `TestClaimRefusesLiveDaemon` |
+| `test_claim_unknown_issue_id_raises` | `TestClaimUnknownIssueErrs` |
+| `test_release_by_holder_succeeds` | `TestReleaseByHolder` |
+| `test_release_by_non_holder_refused` | `TestReleaseByNonHolderConflict` |
+| `test_release_unclaimed_is_noop` | `TestReleaseUnclaimedIsNoop` |
+| `test_list_returns_active_leases` | `TestListReturnsActive` |
+| `test_list_flags_stale_leases` | `TestListFlagsStale` |
+| `test_doctor_yellow_on_stale_leases` | `internal/doctor.TestDoctorYellowOnStaleLeases` |
+| `test_doctor_no_lease_row_when_no_active_leases` | `internal/doctor.TestDoctorNoLeaseRowWhenNoActiveLeases` |
+| (extra) | `TestReleaseRefusesLiveDaemon` |
+
+### `tests/test_mergeslot.py` (13 → 13)
+
+| Python | Go (`internal/mergeslot`) |
+|---|---|
+| `test_status_missing_when_slot_not_created` | `TestStatusMissing` |
+| `test_status_open_when_no_holder` | `TestStatusOpen` |
+| `test_status_held_returns_holder` | `TestStatusHeld` |
+| `test_acquire_open_slot_succeeds` | `TestAcquireOpenSlotSucceeds` |
+| `test_second_acquire_by_other_holder_is_refused` | `TestAcquireConflictRefused` |
+| `test_acquire_self_idempotent` | `TestAcquireSelfIdempotentNoCall` |
+| `test_acquire_refuses_when_daemon_alive` | `TestAcquireRefusesLiveDaemon` |
+| `test_release_by_holder_succeeds` | `TestReleaseByHolder` |
+| `test_release_by_non_holder_refused` | `TestReleaseNonHolderConflict` |
+| `test_release_when_open_is_noop` | `TestReleaseWhenOpenIsNoop` |
+| `test_critical_section_acquires_then_releases` | `TestCriticalSectionAcquiresThenReleases` |
+| `test_critical_section_releases_on_exception` | `TestCriticalSectionReleasesOnError` |
+| `test_critical_section_refused_when_held_by_other` | `TestCriticalSectionRefusedWhenHeldByOther` |
+
+### `tests/test_syncbranch.py` (11 → 11)
+
+| Python | Go (`internal/syncbranch`) |
+|---|---|
+| `test_guard_clean_no_deltas_on_non_sync_branch` | `TestCleanNoStrandedCommits` |
+| `test_guard_empty_sync_branch_is_yellow` | `TestEmptySyncBranchIsYellow` |
+| `test_guard_bead_deltas_on_feature_branch_is_red` | `TestStrandedCommitOnFeatureBranchIsRed` |
+| `test_guard_main_branch_with_bead_commits_is_red` | `TestStrandedCommitOnMainBranchIsRed` |
+| `test_guard_trunk_subset_of_sync_is_not_stranded` | `TestContentSubsetSuppressesStranding` |
+| `test_guard_trunk_identical_to_sync_is_not_stranded` | `TestTrunkIdenticalToSyncIsNotStranded` |
+| `test_guard_trunk_stale_record_is_not_stranded` | `TestTrunkStaleRecordIsNotStranded` |
+| `test_set_writes_config_json` | `TestSetBranchWritesConfigJSON` |
+| `test_set_refuses_with_live_daemon` | `TestSetBranchRefusesLiveDaemon` |
+| `test_doctor_red_when_stranded_bead_commits` | `TestDoctorSignalRedWhenStranded` (per-pkg signal) |
+| `test_doctor_green_when_no_stranding` | `TestDoctorSignalGreenWhenClean` (per-pkg signal) |
+| (extra) | `TestStrandedMessageFormat`, `TestMissingSyncBranchIsYellow`, `TestSetBranchRefusesNonWorkspace` |
+
+### `tests/test_trunksync.py` (15 → 15)
+
+| Python | Go (`internal/trunksync`) |
+|---|---|
+| `test_scan_clean_when_no_drift` | `TestScanClean` |
+| `test_scan_detects_sync_branch_ahead` | `TestScanSyncBranchAhead` |
+| `test_scan_detects_divergent_trunk_edit_is_red` | `TestScanDivergentTrunkEdit` |
+| `test_scan_trunk_subset_of_sync_is_not_divergent` | `TestScanTrunkSubsetOfSyncIsNotDivergent` |
+| `test_scan_trunk_stale_record_is_not_divergent` | `TestScanTrunkStaleRecordIsNotDivergent` |
+| `test_apply_proceeds_when_trunk_subset_of_sync` | `TestApplyProceedsWhenTrunkSubsetOfSync` |
+| `test_scan_missing_sync_branch_is_yellow` | `TestScanMissingSyncBranchYellow` |
+| `test_apply_dry_run_does_not_mutate` | `TestApplyDryRunNoMutation` |
+| `test_apply_fast_forwards_clean_delta` | `TestApplyFastForwardsCleanDelta` |
+| `test_apply_is_idempotent` | `TestApplyIdempotent` |
+| `test_apply_refuses_on_divergent_trunk_edit` | `TestApplyRefusesOnDivergentTrunkEdit` |
+| `test_apply_refuses_when_daemon_alive` | `TestApplyRefusesLiveDaemon` |
+| `test_apply_refuses_with_dirty_working_tree` | `TestApplyRefusesDirtyTree` |
+| `test_doctor_yellow_on_sync_branch_drift` | `TestDoctorYellowOnSyncBranchDrift` (per-pkg) |
+| `test_doctor_red_on_divergent_trunk_edit` | `TestDoctorRedOnDivergentTrunkEdit` (per-pkg) |
+
+### `tests/test_board.py` (21 → 21)
+
+| Python | Go |
+|---|---|
+| `test_open_no_deps_is_ready` | `internal/board.TestOpenNoDepsIsReady` |
+| `test_open_blocked_by_open_dep_is_blocked` | `internal/board.TestBlockedByOpenDep` |
+| `test_unblocked_when_dep_closed` | `internal/board.TestUnblockedWhenDepClosed` |
+| `test_parent_child_does_not_block` | `internal/board.TestParentChildIsNotBlocking` |
+| `test_in_progress_with_assignee_no_lease_gap` | `internal/board.TestInProgressWithAssigneeNoLeaseGap` |
+| `test_in_progress_without_assignee_is_lease_gap` | `internal/board.TestInProgressLeaseGap` |
+| `test_closed_excluded_but_counted` | `internal/board.TestClosedExcludedButCounted` |
+| `test_unresolved_blocker_is_non_blocking` | `internal/board.TestUnresolvedBlockerIsNonBlocking` |
+| `test_multiple_blocks_blocked_if_any_open` | `internal/board.TestMultipleBlocksBlockedIfAnyOpen` |
+| `test_status_blocked_string_is_blocked` | `internal/board.TestStatusBlockedString` |
+| `test_unknown_status_omitted_from_buckets` | `internal/board.TestUnknownStatusGoesToOther` |
+| `test_cross_project_aggregation_and_ordering` | `internal/board.TestCrossProjectOrderingAndPriority` |
+| `test_malformed_lines_are_skipped` | `internal/board.TestMalformedLinesSkipped` |
+| `test_empty_jsonl_is_safe` | `internal/board.TestEmptyJSONLSafe` |
+| `test_missing_jsonl_is_safe` | `internal/board.TestMissingJSONLSafe` |
+| `test_cli_json_shape` | `cmd/bk.TestCLIBoardJSONShape` |
+| `test_cli_status_filter_ready_only` | `cmd/bk.TestCLIBoardStatusFilterReadyOnly` |
+| `test_cli_strict_exits_one_on_lease_gaps` | `cmd/bk.TestCLIBoardStrictExitsOneOnGaps` |
+| `test_cli_strict_zero_when_no_gaps` | `cmd/bk.TestCLIBoardStrictZeroWhenNoGaps` |
+| `test_cli_lease_gaps_only` | `cmd/bk.TestCLIBoardLeaseGapsOnly` |
+| `test_cli_quiet_silences_empty_message` | `cmd/bk.TestCLIBoardQuietSilencesEmptyMessage` |
+
+---
+
+## 3. Tests that don't port 1:1
+
+None. Every Python test has at least one Go counterpart.
+
+A handful of Python tests target Python-only mechanics (`PlanNormalize`
+existed only in M2 because Go was staged differently). Those still
+have a Go equivalent that exercises the same external contract — just
+under different names and packages.
+
+## 4. Accepted divergence ledger
+
+Recorded by the harness so deep-equal succeeds even when the
+implementations differ idiomatically. None of these affect behavior
+the user observes — they're language-level conveniences.
+
+| # | Surface | Python | Go | Reason |
+|---|---|---|---|---|
+| 1 | JSON missing scalar fields | `null` | `""` / `0` | Go emits zero-values via `json.Marshal`; Python emits `None`. Functionally indistinguishable. Harness treats them as equivalent. |
+| 2 | JSON empty collections | `[]` | `null` (nil slice) | `json.Marshal(nil)` yields `null` in Go. Python emits `[]`. Harness treats both as "no items". |
+| 3 | JSON debug fields on `ProjectHealth` | `daemon: {...}`, `git: {...}` | (omitted) | Python attaches raw daemon/git state to the JSON for debugging; Go's contract is the `checks` array. Harness drops both keys. |
+| 4 | Remediation messages | `\`beadkeeper guard sync-branch --set\`` | `\`bk guard sync-branch --set\`` | The two binaries have different names. Same instruction, different binary. Harness rewrites Python form -> Go form. |
+| 5 | Run-volatile JSON keys | `generated_at`, `scanned_paths` | (same fields, different values per run) | Wall-clock time. Harness drops both. |
+| 6 | Daemon-pid in error messages | `bd daemon (pid 12345)` | (same) | The host pid varies per test. Harness collapses `pid <N>` -> `pid <PID>`. |
+| 7 | Path resolution | `/tmp/...` | `/private/tmp/...` (macOS resolved symlink) | macOS' `/tmp` is a symlink to `/private/tmp`. Harness collapses both. |
+| 8 | Refusal error wording | "refusing to apply: ... is alive for /...; stop the daemon and re-run" (Go) vs "...is alive. Stop the daemon and re-run." (Python) | trailing punctuation, capitalization | `golangci-lint`'s `revive.error-strings` rule. Harness substring-matches `daemon`, `divergent`, `dirty`, `working tree`, `index`, `conflict`. |
+
+## 5. Running
+
+```bash
+# Build + unit tests (no Python dependency).
+go test -race -count=1 ./...
+
+# Diff harness — needs Python beadkeeper on PATH or BEADKEEPER_PY=...
+BEADKEEPER_PY=/path/to/beadkeeper go test -count=1 -v ./tools/diffharness/...
+```
+
+The harness skips with a clear message when the Python tool isn't
+findable, so CI without Python doesn't false-fail.
+
+## 6. M4 results
+
+- **Python tests counted:** 133 (12 files).
+- **Go tests at M4 close:** 187 (`grep -hE '^func Test' cmd/bk/*.go internal/*/*.go tools/*/*.go`).
+- **Diff harness corpus:** 8 fixtures across doctor (json + text), board (json), guard db (clean + RED + dry-run-fix), identity (live-daemon refuse), version.
+- **Harness verdict:** ZERO divergence under the contract documented above, with the eight accepted-delta normalizations applied. Every fixture passes locally with `BEADKEEPER_PY=/Users/.../beadkeeper`.
