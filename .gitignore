@@ -1,0 +1,31 @@
+# Local-built binary; produced by goreleaser/CI and committed nowhere.
+/bk
+/bin/
+/dist/
+
+# Bead DB lives in .beads/ but the SQLite files are rebuildable cache.
+# Only issues.jsonl is tracked. (Mirrors the Python repo's policy.)
+.beads/*.db
+.beads/*.db-wal
+.beads/*.db-shm
+.beads/*.sock
+.beads/daemon.log
+.beads/daemon.pid
+.beads/daemon.lock
+.beads/*.local_version
+.beads/sync-state.json
+
+# Go tooling.
+*.exe
+*.test
+*.out
+coverage.out
+coverage.txt
+go.work
+go.work.sum
+
+# Editor / OS.
+.DS_Store
+.idea/
+.vscode/
+*.swp

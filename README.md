@@ -11,11 +11,23 @@ The Python original works but is **hard to run** — it needs an interpreter, a 
 
 ## Status
 
-🚧 **Not implemented yet** — this repo currently contains the build plan only.
+**M0 shipped (scaffolding + CI).** No real subcommands yet; only `bk version` works. The
+remaining milestones implement the actual functionality.
 
 - Full specification: [`docs/handoff/EPIC.md`](docs/handoff/EPIC.md)
 - Orchestrator prompt for the implementing agent: [`docs/handoff/ORCHESTRATOR.md`](docs/handoff/ORCHESTRATOR.md)
 - Work is tracked as beads in `.beads/issues.jsonl` (epic `bkg-9cs`, milestones `bkg-9cs.1`–`.6`).
+
+## Build
+
+```bash
+CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o bk ./cmd/bk
+./bk version
+```
+
+Requires Go 1.22+. The binary is fully static — no host runtime, no libc dependency at run
+time. The release pipeline (`.goreleaser.yaml`) produces cross-built binaries for
+`darwin`/`linux` × `amd64`/`arm64`.
 
 ## Design tenets
 
