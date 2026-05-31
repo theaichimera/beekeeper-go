@@ -22,8 +22,10 @@ import (
 	"github.com/theaichimera/beekeeper-go/internal/daemons"
 	"github.com/theaichimera/beekeeper-go/internal/filesync"
 	"github.com/theaichimera/beekeeper-go/internal/identity"
+	"github.com/theaichimera/beekeeper-go/internal/lease"
 	bkproject "github.com/theaichimera/beekeeper-go/internal/project"
 	"github.com/theaichimera/beekeeper-go/internal/syncbranch"
+	"github.com/theaichimera/beekeeper-go/internal/trunksync"
 )
 
 // Severity is GREEN/YELLOW/RED. Used in both per-check and
@@ -109,6 +111,8 @@ func diagnose(p bkproject.Project) ProjectHealth {
 	checks = append(checks, checkDaemonPID(daemon)...)
 	checks = append(checks, checkSyncState(daemon)...)
 	checks = append(checks, checkDaemonHygiene(p)...)
+	checks = append(checks, checkTrunkSync(p)...)
+	checks = append(checks, checkLease(p)...)
 	checks = append(checks, checkIdentity(p)...)
 
 	ph := ProjectHealth{
@@ -391,6 +395,67 @@ func severityFromDaemons(s daemons.Severity) Severity {
 		return YELLOW
 	}
 	return GREEN
+}
+
+// --- check_trunk_sync ---------------------------------------------------
+
+func checkTrunkSync(p bkproject.Project) []Check {
+	var out []Check
+	for _, f := range trunksync.DiagnoseProject(p) {
+		out = append(out, Check{
+			Name:        "trunk-sync",
+			Severity:    severityFromTrunksync(f.Severity),
+			Message:     f.Message,
+			Remediation: f.Remediation,
+		})
+	}
+	return out
+}
+
+func severityFromTrunksync(s trunksync.Severity) Severity {
+	switch s {
+	case trunksync.RED:
+		return RED
+	case trunksync.YELLOW:
+		return YELLOW
+	}
+	return GREEN
+}
+
+// --- check_lease -------------------------------------------------------
+
+const leaseStaleDefault = lease.DefaultStaleAfterSeconds
+
+// checkLease surfaces stale leases for the project. Silent when no
+// leases exist (mirrors Python — keeps GREEN output clean).
+func checkLease(p bkproject.Project) []Check {
+	r := lease.ListLeases([]string{p.Root}, 1, leaseStaleDefault)
+	if len(r.Leases) == 0 {
+		return nil
+	}
+	stale := r.Stale()
+	if len(stale) == 0 {
+		return nil
+	}
+	sample := ""
+	for i, l := range stale {
+		if i == 3 {
+			sample += fmt.Sprintf(", +%d more", len(stale)-3)
+			break
+		}
+		if i > 0 {
+			sample += ", "
+		}
+		sample += fmt.Sprintf("%s(%s)", l.IssueID, l.Assignee)
+	}
+	return []Check{{
+		Name:     "lease",
+		Severity: YELLOW,
+		Message:  fmt.Sprintf("%d stale lease(s) in `.beads/issues.jsonl`: %s.", len(stale), sample),
+		Remediation: "Investigate each stale lease and either release " +
+			"(`bk lease release <issue-id>`) or refresh by updating the issue. " +
+			"Stale leases typically mean an agent crashed mid-task without releasing.",
+	}}
 }
 
 // --- check_identity ----------------------------------------------------

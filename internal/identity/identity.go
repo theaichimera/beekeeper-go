@@ -12,6 +12,7 @@ package identity
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -20,6 +21,11 @@ import (
 	"github.com/theaichimera/beekeeper-go/internal/config"
 	bkproject "github.com/theaichimera/beekeeper-go/internal/project"
 )
+
+// NormalizeError signals a refused mutation (e.g. daemon alive).
+type NormalizeError struct{ Msg string }
+
+func (e *NormalizeError) Error() string { return e.Msg }
 
 // ActorFields mirrors Python's `_ACTOR_FIELDS` — the set of JSONL
 // fields that record a human/agent identity.
@@ -142,21 +148,19 @@ func Scan(paths []string, maxDepth int) ScanReport {
 
 // --- dry-run normalize --------------------------------------------------
 
-// NormalizeResult is the result of a dry-run rewrite plan. Real
-// rewrites belong in M3 — this struct is the same shape so M3 can
-// extend it without breaking callers.
+// NormalizeResult is the result of a Normalize call.
 type NormalizeResult struct {
 	ProjectRoot       string
 	JSONLPath         string
 	DryRun            bool
 	WouldRewriteCount int
+	RewroteCount      int
 	MappedHandles     map[string]string
 	SkippedUnmapped   map[string]struct{}
 }
 
 // PlanNormalize walks the JSONL and reports what a normalize WOULD do.
-// It NEVER writes — M2 is detection only. The corresponding mutation
-// path lives in M3 (identity.Normalize(..., dryRun=false)).
+// Never writes; same shape as Normalize(..., dryRun=true).
 func PlanNormalize(repo string) NormalizeResult {
 	cfg, _ := LoadConfig(repo)
 	if cfg == nil {
@@ -229,6 +233,129 @@ func copyStringSet(in map[string]struct{}) map[string]struct{} {
 	out := make(map[string]struct{}, len(in))
 	for k := range in {
 		out[k] = struct{}{}
+	}
+	return out
+}
+
+// Normalize rewrites aliased handles in `.beads/issues.jsonl` to their
+// canonical form. Refuses while the bd daemon is alive. Returns a
+// result describing what was (or would be) changed.
+//
+// Mirrors Python `normalize(... dry_run=...)` verbatim:
+//   - Only ALIASED handles are rewritten; unmapped handles are left
+//     untouched and surfaced via `SkippedUnmapped`.
+//   - When `dryRun` is true, no IO is performed beyond reads.
+//   - When `dryRun` is false and the JSONL has changes, the file is
+//     rewritten atomically (write + rename).
+func Normalize(repo string, dryRun bool) (NormalizeResult, error) {
+	repoAbs := repo
+	if abs, err := filepath.Abs(repo); err == nil {
+		repoAbs = abs
+	}
+	p := bkproject.Project{Root: repoAbs}
+	result := NormalizeResult{
+		ProjectRoot:     repoAbs,
+		JSONLPath:       p.IssuesJSONL(),
+		DryRun:          dryRun,
+		MappedHandles:   map[string]string{},
+		SkippedUnmapped: map[string]struct{}{},
+	}
+	if _, err := os.Stat(result.JSONLPath); err != nil {
+		// Missing JSONL is silent — nothing to rewrite.
+		return result, nil
+	}
+	cfg, _ := LoadConfig(repoAbs)
+	if cfg == nil {
+		cfg = &config.IdentityConfig{
+			Canonical: map[string]struct{}{},
+			Aliases:   map[string]string{},
+		}
+	}
+
+	if !dryRun {
+		st := bkproject.ReadDaemonState(p)
+		if st.PIDAlive {
+			return result, &NormalizeError{Msg: fmt.Sprintf(
+				"refusing to rewrite %s: bd daemon (pid %d) is alive. Stop the daemon and re-run.",
+				result.JSONLPath, st.PID,
+			)}
+		}
+	}
+
+	// Read raw lines so we preserve original line ordering exactly.
+	data, err := os.ReadFile(result.JSONLPath)
+	if err != nil {
+		return result, err
+	}
+	lines := splitLinesPreservingEmpty(string(data))
+	anyChanges := false
+	for i, raw := range lines {
+		line := strings.TrimRight(raw, "\r")
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			continue
+		}
+		changed := false
+		for _, f := range ActorFields {
+			v, ok := rec[f].(string)
+			if !ok || v == "" {
+				continue
+			}
+			if _, canonical := cfg.Canonical[v]; canonical {
+				continue
+			}
+			target, isAlias := cfg.Aliases[v]
+			if isAlias {
+				if _, ok := cfg.Canonical[target]; ok {
+					rec[f] = target
+					result.MappedHandles[v] = target
+					changed = true
+					if dryRun {
+						result.WouldRewriteCount++
+					} else {
+						result.RewroteCount++
+					}
+					continue
+				}
+			}
+			result.SkippedUnmapped[v] = struct{}{}
+		}
+		if changed {
+			b, _ := json.Marshal(rec)
+			lines[i] = string(b)
+			anyChanges = true
+		}
+	}
+
+	if !dryRun && anyChanges {
+		out := strings.Join(lines, "\n")
+		// Preserve trailing newline if the original had one.
+		if len(data) > 0 && data[len(data)-1] == '\n' && !strings.HasSuffix(out, "\n") {
+			out += "\n"
+		}
+		tmp := result.JSONLPath + ".tmp"
+		if err := os.WriteFile(tmp, []byte(out), 0o644); err != nil {
+			return result, err
+		}
+		if err := os.Rename(tmp, result.JSONLPath); err != nil {
+			return result, err
+		}
+	}
+	return result, nil
+}
+
+func splitLinesPreservingEmpty(s string) []string {
+	if s == "" {
+		return nil
+	}
+	out := strings.Split(s, "\n")
+	// trailing empty entry from trailing newline — drop so write-back
+	// doesn't double the trailing newline.
+	if len(out) > 0 && out[len(out)-1] == "" {
+		out = out[:len(out)-1]
 	}
 	return out
 }
