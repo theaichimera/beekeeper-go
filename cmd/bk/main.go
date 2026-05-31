@@ -30,6 +30,10 @@ func newRootCmd() *cobra.Command {
 		SilenceErrors: true,
 	}
 	root.AddCommand(newVersionCmd())
+	root.AddCommand(newDoctorCmd())
+	root.AddCommand(newBoardCmd())
+	root.AddCommand(newGuardCmd())
+	root.AddCommand(newIdentityCmd())
 	return root
 }
 
