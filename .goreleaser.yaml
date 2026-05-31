@@ -1,0 +1,76 @@
+# Beekeeper Go release config.
+#
+# Produces a single static binary (`bk`) for darwin/linux on amd64/arm64,
+# wires version/commit/date via ldflags, and publishes a GitHub release.
+# Homebrew tap publishing is included but commented until a tap repo
+# exists — uncomment once theaichimera/homebrew-tap is provisioned.
+
+version: 2
+
+project_name: beekeeper-go
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - id: bk
+    main: ./cmd/bk
+    binary: bk
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.Version={{.Version}}
+      - -X main.Commit={{.Commit}}
+      - -X main.Date={{.Date}}
+
+archives:
+  - id: default
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot"
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^chore:"
+      - "^test:"
+
+# brews:
+#   - name: bk
+#     repository:
+#       owner: theaichimera
+#       name: homebrew-tap
+#     directory: Formula
+#     homepage: https://github.com/theaichimera/beekeeper-go
+#     description: Operations layer for beads (bd) — single-binary Go rewrite.
+#     license: MIT
+#     install: |
+#       bin.install "bk"
+#     test: |
+#       system "#{bin}/bk", "version"
