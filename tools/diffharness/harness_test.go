@@ -142,27 +142,9 @@ func asExit(err error, target **exec.ExitError) bool {
 
 // --- normalization ------------------------------------------------------
 
-// ANSI escape stripper.
-var ansiRE = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
-
-// generated_at differs run-to-run; sync state ages drift.
-var (
-	generatedAtRE = regexp.MustCompile(`"generated_at":\s*[0-9.]+`)
-	pidRE         = regexp.MustCompile(`pid \d+`)
-)
-
-func normalizeText(s, projectRoot string) string {
-	s = ansiRE.ReplaceAllString(s, "")
-	if projectRoot != "" {
-		s = strings.ReplaceAll(s, projectRoot, "<PROJECT>")
-		// Python prints absolute paths via Path.resolve(); on macOS
-		// /tmp gets resolved through /private/tmp. Strip that
-		// prefix difference.
-		s = strings.ReplaceAll(s, "/private<PROJECT>", "<PROJECT>")
-	}
-	s = pidRE.ReplaceAllString(s, "pid <PID>")
-	return s
-}
+// pidRE: collapse `pid <N>` so live-daemon refusal messages match
+// across runs (the host pid varies).
+var pidRE = regexp.MustCompile(`pid \d+`)
 
 // normalizeJSONForCompare returns a generic value with run-volatile
 // keys deleted so deep-equal can match across implementations.
