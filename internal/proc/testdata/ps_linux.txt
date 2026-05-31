@@ -1,0 +1,7 @@
+    1 /sbin/init splash
+  527 /usr/bin/dbus-daemon --system --address=systemd:
+12345 /home/x/.local/bin/bd daemon
+67890 /home/x/.local/bin/bd daemon --workspace=/home/x/work/proj-a --interval 5s
+54321 bd daemon --workspace /home/x/work/proj-b
+99999 /home/x/.local/bin/bd
+30000 /usr/bin/python3 -m bd_helper daemon
