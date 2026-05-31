@@ -290,8 +290,8 @@ func ApplyOne(p bkproject.Project, dryRun bool) (ApplyResult, error) {
 
 	if len(s.TrunkOnly) > 0 {
 		return res, fmt.Errorf(
-			"refusing to apply: %d divergent JSONL edit(s) on `%s` since branching from `%s`. "+
-				"Run `bd sync` to merge cell-wise and re-run.",
+			"refusing to apply: %d divergent JSONL edit(s) on `%s` since branching from `%s`; "+
+				"run `bd sync` to merge cell-wise and re-run",
 			len(s.TrunkOnly), s.Trunk, s.SyncBranch,
 		)
 	}
@@ -311,14 +311,14 @@ func ApplyOne(p bkproject.Project, dryRun bool) (ApplyResult, error) {
 	daemon := bkproject.ReadDaemonState(p)
 	if daemon.PIDAlive {
 		return res, fmt.Errorf(
-			"refusing to apply: bd daemon (pid %d) is alive for %s. Stop the daemon and re-run.",
+			"refusing to apply: bd daemon (pid %d) is alive for %s; stop the daemon and re-run",
 			daemon.PID, p.Root,
 		)
 	}
 	if isIndexOrWorktreeDirty(p.Root) {
 		return res, fmt.Errorf(
-			"refusing to apply: working tree or index is dirty at %s. "+
-				"Commit, stash, or discard the changes and re-run.",
+			"refusing to apply: working tree or index is dirty at %s; "+
+				"commit, stash, or discard the changes and re-run",
 			p.Root,
 		)
 	}
