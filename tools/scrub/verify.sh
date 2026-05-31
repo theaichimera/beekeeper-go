@@ -8,7 +8,14 @@ set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
-LONG_RE='trilogy|khoros|vendor.example|toolgate|agentflow|cloudfix|crossover|aurea|spigit|cornerstone|nomio|contributor'
+# NOTE: the two scrub-source tokens are written with a bracketed letter
+# (dev[f]actory / dschwart[z]i). The regex still matches the real tokens,
+# but the file no longer contains the contiguous literal — so when scrub.sh
+# runs git-filter-repo --replace-text over the whole tree, it CANNOT rewrite
+# this denylist and turn it into a self-referential check. Do not "fix" the
+# brackets. tools/scrub/* is excluded from the scans below for the same
+# reason (scrub.sh's replacement table must hold the literal tokens).
+LONG_RE='trilogy|khoros|dev[f]actory|toolgate|agentflow|cloudfix|crossover|aurea|spigit|cornerstone|nomio|dschwart[z]i'
 SHORT_RE='[[:<:]](csod|esw|jive)[[:>:]]'
 VENDOR_RE="(${LONG_RE})|${SHORT_RE}"
 
@@ -25,7 +32,7 @@ else
 fi
 
 echo "--- 2/4: commit diffs (-G regex) ---"
-hits=$(git log --all --no-merges --pretty=format:"%h %s" -G "$VENDOR_RE" || true)
+hits=$(git log --all --no-merges --pretty=format:"%h %s" -G "$VENDOR_RE" -- . ':(exclude)tools/scrub/*' || true)
 if [ -n "$hits" ]; then
   echo "LEAK in commit diffs:"
   echo "$hits"
@@ -36,7 +43,7 @@ fi
 
 echo "--- 3/4: tracked file contents at every ref ---"
 for ref in $(git for-each-ref --format='%(refname)' refs/heads refs/tags refs/remotes refs/backup 2>/dev/null); do
-  hits=$(git grep -l -i -E "$VENDOR_RE" "$ref" -- 2>/dev/null || true)
+  hits=$(git grep -l -i -E "$VENDOR_RE" "$ref" -- . ':(exclude)tools/scrub/*' 2>/dev/null || true)
   if [ -n "$hits" ]; then
     # `refs/backup/...` is exempt (the backup ref intentionally
     # carries the pre-scrub state until we delete it).
