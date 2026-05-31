@@ -60,3 +60,6 @@
 # - linear.api-key
 # - github.org
 # - github.repo
+
+# Neutral actor for this repo (prevents identity leakage into bead metadata)
+actor: theaichimera
