@@ -20,14 +20,39 @@ Python `beadkeeper` on `PATH` (or `BEADKEEPER_PY=<path>`).
 
 | Surface | What we compare | How |
 |---|---|---|
-| `doctor`, `board` text reports | byte-equivalent paths, severity, ordering, structure | byte-compare AFTER ANSI-strip + path normalization |
-| `doctor`, `board`, `guard *`, `lease list`, `merge-slot status`, `trunk-sync` `--json` | shape + values | parse both, run `reflect.DeepEqual` after key normalization |
-| Refusal paths (daemon-alive, divergent, dirty-tree, etc.) | exit code + required keyword in stderr/stdout | exit code MUST match exactly; messages substring-match (`daemon`, `divergent`, `dirty`/`working tree`/`index`, `conflict`) |
+| `doctor`, `board`, `guard db` text reports | severity tokens + structure | substring-match key tokens (`RED`, `db-in-filesync`, `Dropbox`, etc.) — ANSI-strip + path normalize is applied first |
+| `--json` output (`doctor`, `board`, `guard db`, `lease list`, `merge-slot status`, `trunk-sync`) | shape + values | parse both, run `reflect.DeepEqual` after the key normalization in §4 |
+| Refusal paths (daemon-alive, conflict, divergent, dirty-tree) | exit code + required keyword in stderr/stdout | exit code MUST match exactly; messages substring-match (`daemon`, `divergent`, `dirty`/`working tree`/`index`, `held by`, `REFUSE`, `bob`/etc.) |
+| Idempotency / no-op paths (`lease claim` self, `merge-slot acquire` self, `lease release` unclaimed, `merge-slot release` open, `trunk-sync --apply` dry-run) | exit code + required keyword in stdout | exit code MUST match exactly; substring-match (`already held`, `already released`, `DRY-RUN`) |
 | `--version` | both binaries exit 0 (text differs by design) | rc-only |
 
 The harness lives at `tools/diffharness/harness_test.go`. Build the Go
 binary up-front (out of any `t.TempDir()`), invoke both binaries
 on the same fixture corpus, and compare per the table above.
+
+### Fixture coverage (24 fixtures at M6 close)
+
+| Subcommand | Cases |
+|---|---|
+| `doctor` | json (healthy), text (RED via DB-in-filesync) |
+| `board` | json |
+| `guard db` | clean, RED-inside-sync |
+| `identity normalize` | live-daemon refusal (rc=3 + "daemon") |
+| `version` | rc=0 |
+| `lease list` | empty, active+stale (`age_seconds` ignored — wall-clock-volatile) |
+| `lease claim` | self-idempotent (rc=0 + "already held"), conflict (rc=3 + "REFUSE" + "held by" + holder name) |
+| `lease release` | non-holder (rc=3 + "REFUSE" + "held by"), unclaimed (rc=0 + "already released") |
+| `merge-slot status` | missing, open, held — `--json` parity |
+| `merge-slot acquire` | self-idempotent, conflict |
+| `merge-slot release` | non-holder, when-open no-op |
+| `trunk-sync` | scan clean, sync-branch-ahead, divergent-trunk-edit (rc=2), `--apply` dry-run |
+
+**Bd-stub PATH override.** `trunk-sync` fixtures inject a no-op `bd`
+shim at the front of `PATH` so neither binary's `bd config get`
+shell-out reaches the real bd binary (which stack-overflows walking
+`/tmp` symlinks on synthetic repos). With the shim returning rc=1,
+both implementations fall back to reading `.beads/config.json` —
+the documented fallback path. See `stubbedBdPath()` in the harness.
 
 ## 2. Test-by-test map (133 Python → Go)
 
@@ -280,9 +305,16 @@ BEADKEEPER_PY=/path/to/beadkeeper go test -count=1 -v ./tools/diffharness/...
 The harness skips with a clear message when the Python tool isn't
 findable, so CI without Python doesn't false-fail.
 
-## 6. M4 results
+## 6. Results
 
 - **Python tests counted:** 133 (12 files).
-- **Go tests at M4 close:** 187 (`grep -hE '^func Test' cmd/bk/*.go internal/*/*.go tools/*/*.go`).
-- **Diff harness corpus:** 8 fixtures across doctor (json + text), board (json), guard db (clean + RED + dry-run-fix), identity (live-daemon refuse), version.
-- **Harness verdict:** ZERO divergence under the contract documented above, with the eight accepted-delta normalizations applied. Every fixture passes locally with `BEADKEEPER_PY=/Users/.../beadkeeper`.
+- **Go tests at M6 close:** ~210 (`grep -hE '^func Test' cmd/bk/*.go internal/*/*.go tools/*/*.go`).
+- **Diff harness corpus:** **24 fixtures** across doctor (json + text), board (json), guard db (clean + RED), identity (live-daemon refuse), version, lease (list × 2 + claim × 2 + release × 2), merge-slot (status × 3 + acquire × 2 + release × 2), trunk-sync (scan × 3 + apply dry-run).
+- **Harness verdict:** ZERO divergence under the contract above, with the cross-language deltas in §4 normalized away. Every fixture passes locally with `BEADKEEPER_PY=/Users/.../beadkeeper`.
+
+## 7. M6 follow-up: coordination harness coverage (bkg-9cs.7)
+
+M4 left a gap — the harness omitted lease, merge-slot, and trunk-sync
+fixtures. M6 closed it with the 12 new fixtures listed in §1. The
+PARITY.md §1 contract now reflects the actual coverage rather than
+asserted coverage.
