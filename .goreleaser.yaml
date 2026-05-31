@@ -61,16 +61,37 @@ changelog:
       - "^chore:"
       - "^test:"
 
-# brews:
-#   - name: bk
-#     repository:
-#       owner: theaichimera
-#       name: homebrew-tap
-#     directory: Formula
-#     homepage: https://github.com/theaichimera/beekeeper-go
-#     description: Operations layer for beads (bd) — single-binary Go rewrite.
-#     license: MIT
-#     install: |
-#       bin.install "bk"
-#     test: |
-#       system "#{bin}/bk", "version"
+# Homebrew tap publishing.
+#
+# Goreleaser will auto-update Formula/bk.rb in the tap repo on every
+# tag-driven release. The tap repo (theaichimera/homebrew-tap) must
+# exist and be writable by the GH_PAT env var that the release workflow
+# injects.
+#
+# To dry-run locally without publishing:
+#   goreleaser release --snapshot --clean --skip-publish
+#
+# A reference Formula is also kept in-tree at pkg/homebrew/Formula/bk.rb
+# so reviewers can inspect what goreleaser will write before tagging.
+brews:
+  - name: bk
+    repository:
+      owner: theaichimera
+      name: homebrew-tap
+      token: "{{ .Env.GH_PAT }}"
+    directory: Formula
+    homepage: https://github.com/theaichimera/beekeeper-go
+    description: Operations layer for beads (bd) — single-binary Go rewrite of beadkeeper.
+    license: MIT
+    commit_author:
+      name: theaichimera
+      email: theaichimera@users.noreply.github.com
+    skip_upload: auto # only publish on stable tags (v[0-9]+...), skip pre-releases
+    install: |
+      bin.install "bk"
+    test: |
+      system "#{bin}/bk", "version"
+    caveats: |
+      bk is the Go port of beadkeeper (Python). Both operate on the same
+      .beads/ directory and are interchangeable per-invocation.
+      See https://github.com/theaichimera/beekeeper-go#interop-with-python-beadkeeper
