@@ -56,8 +56,8 @@ func newIdentityCheckCmd() *cobra.Command {
 					"has_drift":            r.HasDrift(),
 				}
 				b, _ := json.MarshalIndent(payload, "", "  ")
-				out.Write(b)
-				out.Write([]byte("\n"))
+				_, _ = out.Write(b)
+				_, _ = out.Write([]byte("\n"))
 				if r.HasDrift() && strict {
 					silentExit(1)
 				}

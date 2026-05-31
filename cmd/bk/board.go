@@ -28,8 +28,8 @@ func newBoardCmd() *cobra.Command {
 			if jsonOut {
 				payload := boardJSONPayload(r)
 				b, _ := json.MarshalIndent(payload, "", "  ")
-				out.Write(b)
-				out.Write([]byte("\n"))
+				_, _ = out.Write(b)
+				_, _ = out.Write([]byte("\n"))
 				if strict && r.Totals()["lease_gaps"] > 0 {
 					silentExit(1)
 				}

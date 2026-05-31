@@ -40,8 +40,8 @@ func newGuardSyncBranchCmd() *cobra.Command {
 					"findings": syncbranchFindingsToJSON(r.Findings),
 				}
 				b, _ := json.MarshalIndent(payload, "", "  ")
-				out.Write(b)
-				out.Write([]byte("\n"))
+				_, _ = out.Write(b)
+				_, _ = out.Write([]byte("\n"))
 			} else if len(r.Findings) == 0 {
 				if !quiet {
 					fmt.Fprintln(out, "OK — sync.branch is configured and no bead-data commits are stranded on non-sync branches.")
@@ -98,8 +98,8 @@ func newGuardDaemonCmd() *cobra.Command {
 					"findings": daemonFindingsToJSON(r.Findings),
 				}
 				b, _ := json.MarshalIndent(payload, "", "  ")
-				out.Write(b)
-				out.Write([]byte("\n"))
+				_, _ = out.Write(b)
+				_, _ = out.Write([]byte("\n"))
 			} else if len(r.Findings) == 0 {
 				if !quiet {
 					fmt.Fprintln(out, "OK — no duplicate daemons, no recent remote-helper failures.")
