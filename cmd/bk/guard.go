@@ -26,12 +26,25 @@ func newGuardSyncBranchCmd() *cobra.Command {
 		quiet    bool
 		maxDepth int
 		strict   bool
+		setVal   string
 	)
 	c := &cobra.Command{
 		Use:   "sync-branch [path...]",
 		Short: "Detect empty sync.branch + bead commits stranded off the sync branch.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			paths := defaultPaths(args)
+			if setVal != "" {
+				target := paths[0]
+				res, err := syncbranch.SetBranch(target, setVal)
+				out := cmd.OutOrStdout()
+				if err != nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "REFUSE: %s (%s)\n", err, res.Path)
+					silentExit(3)
+					return nil
+				}
+				fmt.Fprintf(out, "sync.branch set to '%s' at %s\n", setVal, res.Path)
+				return nil
+			}
 			r := syncbranch.Scan(paths, maxDepth)
 			out := cmd.OutOrStdout()
 			if jsonOut {
@@ -75,6 +88,7 @@ func newGuardSyncBranchCmd() *cobra.Command {
 	c.Flags().BoolVar(&quiet, "quiet", false, "")
 	c.Flags().IntVar(&maxDepth, "max-depth", 4, "")
 	c.Flags().BoolVar(&strict, "strict", false, "exit 1 on YELLOW as well as RED")
+	c.Flags().StringVar(&setVal, "set", "", "set sync.branch in .beads/config.json (refuses if daemon is alive)")
 	return c
 }
 

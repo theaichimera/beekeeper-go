@@ -90,24 +90,18 @@ func newIdentityCheckCmd() *cobra.Command {
 	return c
 }
 
-// `identity normalize` in M2 is dry-run ONLY. Real rewrites land in M3.
+// `identity normalize` — dry-run by default; --yes applies the rewrite.
+// Refuses while the bd daemon is alive (M3 mutation rule).
 func newIdentityNormalizeCmd() *cobra.Command {
 	var yes bool
 	c := &cobra.Command{
 		Use:   "normalize [repo]",
-		Short: "Plan rewrite of aliased handles to canonical form (DRY-RUN ONLY in M2).",
+		Short: "Rewrite aliased handles to canonical form (dry-run unless --yes).",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			repo := "."
 			if len(args) == 1 {
 				repo = args[0]
-			}
-			if yes {
-				// Strict M2 contract: refuse mutation.
-				fmt.Fprintln(cmd.ErrOrStderr(),
-					"REFUSE: --yes (mutation) is unavailable in M2; the rewrite path lands in M3.")
-				silentExit(64)
-				return nil
 			}
 			cfg, _ := identity.LoadConfig(repo)
 			if cfg == nil {
@@ -116,9 +110,18 @@ func newIdentityNormalizeCmd() *cobra.Command {
 				silentExit(64)
 				return nil
 			}
-			r := identity.PlanNormalize(repo)
+			r, err := identity.Normalize(repo, !yes)
+			if err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "REFUSE: %s\n", err)
+				silentExit(3)
+				return nil
+			}
 			out := cmd.OutOrStdout()
-			fmt.Fprintf(out, "DRY-RUN — would rewrite %d actor slot(s).\n", r.WouldRewriteCount)
+			if r.DryRun {
+				fmt.Fprintf(out, "DRY-RUN — would rewrite %d actor slot(s).\n", r.WouldRewriteCount)
+			} else {
+				fmt.Fprintf(out, "rewrote %d actor slot(s) in %s.\n", r.RewroteCount, r.JSONLPath)
+			}
 			for _, k := range sortedKeysString(r.MappedHandles) {
 				fmt.Fprintf(out, "  %s -> %s\n", k, r.MappedHandles[k])
 			}
@@ -131,6 +134,6 @@ func newIdentityNormalizeCmd() *cobra.Command {
 			return nil
 		},
 	}
-	c.Flags().BoolVar(&yes, "yes", false, "(M3) apply the rewrite; refused in M2")
+	c.Flags().BoolVar(&yes, "yes", false, "apply the rewrite (otherwise dry-run); refused if daemon is alive")
 	return c
 }

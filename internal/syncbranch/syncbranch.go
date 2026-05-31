@@ -14,6 +14,9 @@ package syncbranch
 
 import (
 	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -21,6 +24,65 @@ import (
 	"github.com/theaichimera/beekeeper-go/internal/git"
 	"github.com/theaichimera/beekeeper-go/internal/project"
 )
+
+// SetBranchError signals a refused set (e.g. daemon alive, not a workspace).
+type SetBranchError struct{ Msg string }
+
+func (e *SetBranchError) Error() string { return e.Msg }
+
+// SetResult mirrors Python's SetResult.
+type SetResult struct {
+	Path          string
+	Written       bool
+	SkippedReason string
+}
+
+// SetBranch writes `.beads/config.json` with `sync.branch = branch`.
+// Refuses while bd daemon is alive (Python's mutation contract).
+func SetBranch(repo, branch string) (SetResult, error) {
+	repoAbs, _ := filepath.Abs(repo)
+	if resolved, err := filepath.EvalSymlinks(repoAbs); err == nil {
+		repoAbs = resolved
+	}
+	p := project.Project{Root: repoAbs}
+	cfgPath := filepath.Join(p.BeadsDir(), "config.json")
+	res := SetResult{Path: cfgPath}
+
+	if info, err := os.Stat(p.BeadsDir()); err != nil || !info.IsDir() {
+		res.SkippedReason = fmt.Sprintf("not a beads workspace (no .beads/ at %s)", repoAbs)
+		return res, &SetBranchError{Msg: res.SkippedReason}
+	}
+
+	st := project.ReadDaemonState(p)
+	if st.PIDAlive {
+		res.SkippedReason = fmt.Sprintf(
+			"bd daemon (pid %d) is alive — refusing to mutate sync.branch. Stop the daemon and re-run.",
+			st.PID,
+		)
+		return res, &SetBranchError{Msg: res.SkippedReason}
+	}
+
+	// Merge into existing config.json if present.
+	var doc map[string]any
+	if existing, err := os.ReadFile(cfgPath); err == nil {
+		_ = json.Unmarshal(existing, &doc)
+	}
+	if doc == nil {
+		doc = map[string]any{}
+	}
+	syncBlock, _ := doc["sync"].(map[string]any)
+	if syncBlock == nil {
+		syncBlock = map[string]any{}
+	}
+	syncBlock["branch"] = branch
+	doc["sync"] = syncBlock
+	out, _ := json.MarshalIndent(doc, "", "  ")
+	if err := os.WriteFile(cfgPath, append(out, '\n'), 0o644); err != nil {
+		return res, err
+	}
+	res.Written = true
+	return res, nil
+}
 
 // JSONLRelPath is the bead JSONL location inside a project.
 const JSONLRelPath = ".beads/issues.jsonl"

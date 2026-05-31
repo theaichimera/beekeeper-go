@@ -34,6 +34,12 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newBoardCmd())
 	root.AddCommand(newGuardCmd())
 	root.AddCommand(newIdentityCmd())
+	root.AddCommand(newLeaseCmd())
+	root.AddCommand(newMergeSlotCmd())
+	root.AddCommand(newTrunkSyncCmd())
+	root.AddCommand(newInstallHooksCmd())
+	root.AddCommand(newUninstallHooksCmd())
+	root.AddCommand(newPromptIndicatorCmd())
 	return root
 }
 
