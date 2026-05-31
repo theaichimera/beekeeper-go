@@ -31,3 +31,9 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # GH_PAT is a fine-grained token with `contents: write` on
+          # theaichimera/homebrew-tap. Required for goreleaser to commit
+          # the updated Formula/bk.rb into the tap on every stable tag.
+          # If unset, goreleaser will fail the brews step. (See
+          # `.goreleaser.yaml`'s brews.repository.token reference.)
+          GH_PAT: ${{ secrets.GH_PAT }}
