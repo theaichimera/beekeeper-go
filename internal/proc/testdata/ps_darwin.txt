@@ -1,0 +1,7 @@
+11472 /sbin/launchd
+12345 /usr/local/bin/bd daemon
+67890 /Users/x/.local/bin/bd daemon --workspace=/Users/x/work/proj-a --interval 5s
+54321 /Users/x/.local/bin/bd daemon --workspace /Users/x/work/proj-b
+99999 /Users/x/.local/bin/bd
+22222 /bin/zsh
+44444 python3 -m bd_helper daemon
