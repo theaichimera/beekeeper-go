@@ -21,8 +21,10 @@ import (
 
 	"github.com/theaichimera/beekeeper-go/internal/daemons"
 	"github.com/theaichimera/beekeeper-go/internal/filesync"
+	"github.com/theaichimera/beekeeper-go/internal/git"
 	"github.com/theaichimera/beekeeper-go/internal/identity"
 	"github.com/theaichimera/beekeeper-go/internal/lease"
+	"github.com/theaichimera/beekeeper-go/internal/prbeads"
 	bkproject "github.com/theaichimera/beekeeper-go/internal/project"
 	"github.com/theaichimera/beekeeper-go/internal/syncbranch"
 	"github.com/theaichimera/beekeeper-go/internal/trunksync"
@@ -114,6 +116,7 @@ func diagnose(p bkproject.Project) ProjectHealth {
 	checks = append(checks, checkTrunkSync(p)...)
 	checks = append(checks, checkLease(p)...)
 	checks = append(checks, checkIdentity(p)...)
+	checks = append(checks, checkPRBeads(p, gitState)...)
 
 	ph := ProjectHealth{
 		ProjectRoot: p.Root,
@@ -494,6 +497,81 @@ func checkIdentity(p bkproject.Project) []Check {
 			"`bk identity normalize` rewrites aliases to canonical form (dry-run by default). " +
 			"Add unmapped handles to `.beadkeeper/identity.toml`'s `[identity.aliases]` " +
 			"or `[identity].canonical` list.",
+	}}
+}
+
+// --- check_pr_beads ----------------------------------------------------
+
+// checkPRBeads is opt-in: it runs only when (a) a remote default
+// branch resolves AND (b) the current branch is a feature branch
+// distinct from that base AND (c) git is available. Otherwise it
+// emits no check (silent) so doctor stays quiet on freshly-cloned
+// repos, detached-HEAD states, and projects without a remote.
+//
+// We deliberately ignore $GITHUB_BASE_REF here — that's a CI signal,
+// not a local-developer signal. CI invocations should call
+// `bk guard pr-beads` directly.
+func checkPRBeads(p bkproject.Project, g bkproject.GitState) []Check {
+	if !git.Available() {
+		return nil
+	}
+	base, ok := prbeads.ResolveBaseRef(p.Root, "", false)
+	if !ok {
+		return nil
+	}
+	head := strings.TrimSpace(g.Branch)
+	if head == "" {
+		return nil
+	}
+	// Don't compare a branch to itself or to its short alias.
+	if base == head || base == "origin/"+head {
+		return nil
+	}
+	r, err := prbeads.Diagnose(p.Root, base, head, prbeads.PolicyRegression)
+	if err != nil {
+		return nil
+	}
+	if len(r.Findings) == 0 {
+		return nil
+	}
+	worst := GREEN
+	for _, f := range r.Findings {
+		if f.Severity == prbeads.RED && worst != RED {
+			worst = RED
+		}
+	}
+	if worst != RED {
+		return nil
+	}
+	sample := r.Findings[0]
+	if len(r.Findings) > 1 {
+		return []Check{{
+			Name:     "pr-beads",
+			Severity: RED,
+			Message: fmt.Sprintf(
+				"%d backlog regression(s) on `%s` vs `%s` (e.g. %s on `%s`).",
+				len(r.Findings), head, base, sample.Kind, sample.ID,
+			),
+			Remediation: fmt.Sprintf(
+				"Run `bk guard pr-beads --base %s --head %s` for the full list. "+
+					"Rebase / merge `%s` into your branch and re-export the JSONL "+
+					"so the merge does not rewind backlog state.",
+				base, head, base,
+			),
+		}}
+	}
+	return []Check{{
+		Name:     "pr-beads",
+		Severity: RED,
+		Message: fmt.Sprintf(
+			"%s on `%s`: bead `%s` would regress on merge to `%s`.",
+			sample.Kind, head, sample.ID, base,
+		),
+		Remediation: fmt.Sprintf(
+			"Run `bk guard pr-beads --base %s --head %s` for detail. "+
+				"Rebase / merge `%s` into your branch and re-export the JSONL.",
+			base, head, base,
+		),
 	}}
 }
 

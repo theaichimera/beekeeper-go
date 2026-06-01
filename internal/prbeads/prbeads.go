@@ -42,6 +42,7 @@ package prbeads
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -359,6 +360,41 @@ func readJSONLAt(repo, ref string) (map[string]map[string]any, bool) {
 		out[id] = rec
 	}
 	return out, true
+}
+
+// ResolveBaseRef applies the documented fallback chain:
+//
+//  1. `explicit` if non-empty.
+//  2. `$GITHUB_BASE_REF` (and its `origin/$GITHUB_BASE_REF` variant)
+//     when `useEnv` is true.
+//  3. `origin/<default>` and `<default>` from the remote's
+//     symbolic-ref HEAD.
+//  4. `origin/main` then `main`.
+//
+// Returns ("", false) when nothing in the chain resolves. Set
+// `useEnv=true` for CLI calls (where GITHUB_BASE_REF is the natural
+// CI override) and `useEnv=false` for callers that should ignore the
+// CI environment (e.g. `bk doctor` running locally).
+func ResolveBaseRef(repo, explicit string, useEnv bool) (string, bool) {
+	candidates := []string{}
+	if explicit != "" {
+		candidates = append(candidates, explicit)
+	}
+	if useEnv {
+		if env := os.Getenv("GITHUB_BASE_REF"); env != "" {
+			candidates = append(candidates, "origin/"+env, env)
+		}
+	}
+	if def, ok := git.DefaultRemoteBranch(repo, "origin"); ok {
+		candidates = append(candidates, "origin/"+def, def)
+	}
+	candidates = append(candidates, "origin/main", "main")
+	for _, ref := range candidates {
+		if git.RefExists(repo, ref) {
+			return ref, true
+		}
+	}
+	return "", false
 }
 
 func sortedKeys(m map[string]map[string]any) []string {

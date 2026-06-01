@@ -37,12 +37,17 @@ var preferredBinary = "bk"
 
 const prePushTemplate = `#!/usr/bin/env bash
 %s
-# This hook runs ` + "`bk doctor`" + ` against the current repo and either
-# warns or blocks the push when the report is RED.
+# This hook runs ` + "`bk doctor`" + ` against the current repo and, optionally,
+# ` + "`bk guard pr-beads`" + ` against the configured upstream sync branch. It
+# either warns or blocks the push when either report is RED.
 #
 # Override behavior:
 #   - Set BEADKEEPER_BLOCK_ON_RED=1 to make warnings blocking.
 #   - Set BEADKEEPER_SKIP_HOOK=1 to bypass (e.g. for emergency pushes).
+#   - Set BEADKEEPER_PRBEADS_POLICY to one of:
+#       off       — skip the pr-beads check entirely (default).
+#       regression — warn/block on backlog regressions only.
+#       no-beads  — warn/block on ANY .beads/issues.jsonl modification.
 #
 # Uninstall: ` + "`bk uninstall-hooks`" + `.
 
@@ -64,12 +69,19 @@ fi
 $BK doctor "$REPO_DIR" --no-color
 rc=$?
 
-if [ "$rc" -ne 0 ]; then
+PR_RC=0
+PRBEADS_POLICY="${BEADKEEPER_PRBEADS_POLICY:-off}"
+if [ "$PRBEADS_POLICY" != "off" ]; then
+  ($BK guard pr-beads --repo "$REPO_DIR" --policy "$PRBEADS_POLICY")
+  PR_RC=$?
+fi
+
+if [ "$rc" -ne 0 ] || [ "$PR_RC" -eq 2 ]; then
   if [ "${BEADKEEPER_BLOCK_ON_RED:-%s}" = "1" ]; then
-    printf "\nbeadkeeper: BLOCKING push — doctor reported RED. Override with BEADKEEPER_SKIP_HOOK=1.\n" >&2
+    printf "\nbeadkeeper: BLOCKING push — doctor or pr-beads reported RED. Override with BEADKEEPER_SKIP_HOOK=1.\n" >&2
     exit 1
   fi
-  printf "\nbeadkeeper: warning — doctor reported RED. Push allowed; set BEADKEEPER_BLOCK_ON_RED=1 to block.\n" >&2
+  printf "\nbeadkeeper: warning — doctor or pr-beads reported RED. Push allowed; set BEADKEEPER_BLOCK_ON_RED=1 to block.\n" >&2
 fi
 
 exit 0
