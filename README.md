@@ -274,6 +274,25 @@ for ids bd hasn't ingested yet (e.g. fresh clones with no SQLite DB). `--source 
 `--source jsonl` reads only the on-disk JSONL (the legacy behavior, useful when bd is unreachable
 from the runner).
 
+**`--close` (apply mode)** — close the shipped-not-closed beads automatically:
+
+```bash
+bk guard stale-beads --close                       # dry-run plan
+bk guard stale-beads --close --apply               # actually close them
+bk guard stale-beads --close --apply --json        # agent-driveable summary
+bk guard stale-beads --close --apply \
+  --exclude demo-keep1,demo-keep2                  # skip these specific ids
+bk guard stale-beads --close --apply --force       # close even if blocked by open child issues
+```
+
+Each finding becomes one of:
+
+- **close**: bead has no open blockers; `bd close <id> --reason "shipped in #<PR>"` runs.
+- **skip-blocked**: bead has at least one open `blocks` dependency; bd would refuse with `(use --force)`. Use `--force` to override (closes with `--force`).
+- **skip-excluded**: id appears in `--exclude` — reserved for beads pending verification.
+
+Re-runs are idempotent: bkg-td0.2's authoritative status read sees freshly-closed beads as `closed` so they never re-enter the planner. The `--json` summary's `counts` block is shaped so an agent loop can drive the workflow deterministically.
+
 **JSON shape** (`--json`) — each finding includes a `bd_close_command` field shaped so an
 agent can drive closure deterministically:
 

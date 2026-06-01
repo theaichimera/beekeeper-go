@@ -496,6 +496,238 @@ func filterOpen(in map[string]string) map[string]string {
 	return out
 }
 
+// PlanCloses builds the apply plan for `findings`: which beads to
+// close, which to skip (excluded), which to skip (blocked by open
+// issues), and which to force-close. Pure read; never mutates state.
+//
+// The plan inspects bd's blocker view via `bd list --json` for each
+// finding so a dry-run accurately reflects what `--apply` would do.
+// `excluded` is checked first (excluded beads never reach the bd
+// query). `force` switches blocked beads from skip to force-close.
+//
+// Reason rendering: "shipped in #<PR>" when LandingPR > 0, else
+// "shipped in <short-sha>". Same shape as the bd_close_command
+// JSON field shipped in bkg-bqa.3.
+func PlanCloses(repo string, findings []Finding, excluded []string, force bool) ([]CloseAction, error) {
+	excludeSet := map[string]bool{}
+	for _, id := range excluded {
+		excludeSet[strings.TrimSpace(id)] = true
+	}
+	plan := make([]CloseAction, 0, len(findings))
+	// Cache bd's record set so we ask once per repo.
+	bdRecs, _ := readAllIssueIDsViaBd(repo)
+	blockers, _ := readOpenBlockersViaBd(repo)
+	for _, f := range findings {
+		reason := closeReason(f)
+		act := CloseAction{BeadID: f.BeadID, Reason: reason}
+		if excludeSet[f.BeadID] {
+			act.Decision = DecisionSkipExcluded
+			plan = append(plan, act)
+			continue
+		}
+		// If bd already says closed, this would have been filtered out
+		// by the caller's auto-source merge. Defense-in-depth: skip.
+		if st, ok := bdRecs[f.BeadID]; ok && st == "closed" {
+			continue
+		}
+		if blk, blocked := blockers[f.BeadID]; blocked {
+			if force {
+				act.Decision = DecisionForceCloseBlocked
+				act.Blocker = blk
+			} else {
+				act.Decision = DecisionSkipBlocked
+				act.Blocker = blk
+			}
+			plan = append(plan, act)
+			continue
+		}
+		act.Decision = DecisionClose
+		plan = append(plan, act)
+	}
+	return plan, nil
+}
+
+// ApplyCloses executes a plan against bd. dryRun=true returns the
+// plan unchanged (Applied=false). dryRun=false invokes CloseBead per
+// action; results land in CloseSummary.
+//
+// Idempotent: if a re-run plans to close a bead bd has already closed,
+// CloseBead reports rc 0 and we record success. The bkg-bqa.3 auto
+// merge means a re-run usually has zero plan rows anyway because bd
+// already says closed and the bead never enters openIDs.
+func ApplyCloses(repo string, plan []CloseAction, dryRun bool) CloseSummary {
+	s := CloseSummary{
+		DryRun: dryRun,
+		Apply:  !dryRun,
+	}
+	for _, act := range plan {
+		switch act.Decision {
+		case DecisionSkipExcluded:
+			s.SkippedExcluded = append(s.SkippedExcluded, act.BeadID)
+			s.Actions = append(s.Actions, act)
+			continue
+		case DecisionSkipBlocked:
+			s.SkippedBlocked = append(s.SkippedBlocked, act)
+			s.Actions = append(s.Actions, act)
+			continue
+		}
+		if dryRun {
+			s.Actions = append(s.Actions, act)
+			continue
+		}
+		force := act.Decision == DecisionForceCloseBlocked
+		ok, blocker, _, err := CloseBead(repo, act.BeadID, act.Reason, force)
+		switch {
+		case ok:
+			act.Applied = true
+			s.Closed = append(s.Closed, act.BeadID)
+		case blocker != "" && !force:
+			act.Decision = DecisionSkipBlocked
+			act.Blocker = blocker
+			s.SkippedBlocked = append(s.SkippedBlocked, act)
+		default:
+			if err != nil {
+				act.Error = err.Error()
+			} else {
+				act.Error = "bd close failed"
+			}
+			s.Failed = append(s.Failed, act)
+		}
+		s.Actions = append(s.Actions, act)
+	}
+	return s
+}
+
+// closeReason renders the canonical close-incantation reason.
+func closeReason(f Finding) string {
+	if f.LandingPR > 0 {
+		return fmt.Sprintf("shipped in #%d", f.LandingPR)
+	}
+	if len(f.LandingSHA) >= 7 {
+		return fmt.Sprintf("shipped in %s", f.LandingSHA[:7])
+	}
+	return fmt.Sprintf("shipped in %s", f.LandingSHA)
+}
+
+// readOpenBlockersViaBd returns id -> first-blocker-id for any open
+// bead with at least one OPEN `blocks` dependency. Used by PlanCloses
+// to predict which beads bd will refuse to close. Pure best-effort:
+// when bd is unavailable we return ({}, err) and the planner falls
+// back to discovering blockers at apply time via CloseBead's stderr
+// parsing.
+func readOpenBlockersViaBd(repo string) (map[string]string, error) {
+	rc, stdout, _, err := bkproject.BdRun([]string{"bd", "list", "--json"}, repo, 30*time.Second)
+	if err != nil || rc != 0 {
+		return map[string]string{}, err
+	}
+	var recs []map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &recs); err != nil {
+		return map[string]string{}, err
+	}
+	statusByID := map[string]string{}
+	for _, rec := range recs {
+		id, _ := rec["id"].(string)
+		st, _ := rec["status"].(string)
+		statusByID[id] = st
+	}
+	blockers := map[string]string{}
+	for _, rec := range recs {
+		id, _ := rec["id"].(string)
+		deps, ok := rec["dependencies"].([]any)
+		if !ok {
+			continue
+		}
+		for _, raw := range deps {
+			dep, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			if dep["type"] != "blocks" {
+				continue
+			}
+			tgt, _ := dep["depends_on_id"].(string)
+			if tgt == "" {
+				continue
+			}
+			if st := statusByID[tgt]; st != "" && st != "closed" {
+				blockers[id] = tgt
+				break
+			}
+		}
+	}
+	return blockers, nil
+}
+
+// CloseDecision is the planned action for one bead in apply mode.
+type CloseDecision string
+
+const (
+	DecisionClose             CloseDecision = "close"
+	DecisionSkipBlocked       CloseDecision = "skip-blocked"
+	DecisionSkipExcluded      CloseDecision = "skip-excluded"
+	DecisionForceCloseBlocked CloseDecision = "force-close-blocked"
+)
+
+// CloseAction is one row in the apply plan / result.
+type CloseAction struct {
+	BeadID   string
+	Reason   string
+	Decision CloseDecision
+	Blocker  string // set when Decision is skip-blocked / force-close-blocked
+	Applied  bool   // true if --apply ran AND bd close succeeded
+	Error    string // populated when Applied=false and an attempt was made
+}
+
+// CloseSummary aggregates apply results for the JSON / text output.
+type CloseSummary struct {
+	DryRun          bool
+	Apply           bool
+	Closed          []string
+	SkippedBlocked  []CloseAction
+	SkippedExcluded []string
+	Failed          []CloseAction
+	Actions         []CloseAction
+}
+
+// blockedRe matches bd's refusal message:
+//
+//	"blocked by open issues [<id1>, <id2>] (use --force)"
+//
+// We capture the bracketed list and use the FIRST id as the canonical
+// blocker for human/agent display. The full list is available in the
+// raw stderr if a caller wants more detail.
+var blockedRe = regexp.MustCompile(`blocked by open issues \[([^\]]+)\]`)
+
+// CloseBead invokes `bd close <id> --reason <reason>` (with --force
+// when force=true). Returns:
+//
+//	ok=true                         — bd reported close (rc 0)
+//	ok=false, blocker non-empty     — bd refused: bead has open blockers
+//	ok=false, err non-nil           — any other failure
+//
+// race-safe: if the bead is already closed (post bd-close from another
+// agent), bd reports rc 0 with a "(already closed)"-ish message; we
+// treat that as success too.
+func CloseBead(repo, id, reason string, force bool) (ok bool, blocker string, stderr string, err error) {
+	args := []string{"bd", "close", id, "--reason", reason}
+	if force {
+		args = append(args, "--force")
+	}
+	rc, _, errOut, runErr := bkproject.BdRun(args, repo, 30*time.Second)
+	stderr = errOut
+	if runErr != nil {
+		return false, "", stderr, fmt.Errorf("bd close %s: %w", id, runErr)
+	}
+	if rc == 0 {
+		return true, "", stderr, nil
+	}
+	if m := blockedRe.FindStringSubmatch(errOut); m != nil {
+		first := strings.TrimSpace(strings.SplitN(m[1], ",", 2)[0])
+		return false, first, stderr, nil
+	}
+	return false, "", stderr, fmt.Errorf("bd close %s (rc=%d): %s", id, rc, strings.TrimSpace(errOut))
+}
+
 // readAllIssueIDsViaBd returns id -> status for EVERY bead bd knows
 // about (open / in_progress / blocked / closed). Closed entries are
 // returned so the merge in readOpenIssueIDsFrom can use them to

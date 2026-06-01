@@ -38,6 +38,10 @@ func newGuardStaleBeadsCmd() *cobra.Command {
 		jsonOut   bool
 		shipTypes []string
 		source    string
+		closeMode bool
+		apply     bool
+		exclude   []string
+		force     bool
 	)
 	c := &cobra.Command{
 		Use:   "stale-beads [path]",
@@ -111,6 +115,12 @@ Exit codes (per bk contract):
 				return nil
 			}
 
+			// `--close` (with optional `--apply`) — bkg-td0.3 batch-close path.
+			if closeMode {
+				runStaleBeadsClose(cmd, repo, r, exclude, force, apply, jsonOut)
+				return nil
+			}
+
 			out := cmd.OutOrStdout()
 			if jsonOut {
 				payload := map[string]any{
@@ -159,7 +169,135 @@ Exit codes (per bk contract):
 			"`spec` and scope `bd`/`beads` are always non-shipping regardless")
 	c.Flags().StringVar(&source, "source", "auto",
 		"bead-status source: auto|bd|jsonl (default auto: bd authoritative, JSONL fallback)")
+	c.Flags().BoolVar(&closeMode, "close", false,
+		"plan / apply close for shipped-not-closed beads (dry-run unless --apply)")
+	c.Flags().BoolVar(&apply, "apply", false,
+		"with --close: actually run `bd close` (mutates bead state)")
+	c.Flags().StringSliceVar(&exclude, "exclude", nil,
+		"comma-separated bead ids to skip even if they look shipped (e.g. holds pending verification)")
+	c.Flags().BoolVar(&force, "force", false,
+		"with --close --apply: pass --force to `bd close` so beads with open blockers still close")
 	return c
+}
+
+// runStaleBeadsClose handles the --close / --apply branch of `bk
+// guard stale-beads`. Builds the plan from the supplied Report,
+// executes (when --apply is set), and prints either the agent-driven
+// JSON summary or a human-readable line-by-line plan/result.
+//
+// Exit code stays at the bkg-bqa.3 contract: rc=2 when ANY finding
+// was RED (the underlying detect step), regardless of close outcome.
+// Re-runs land at rc=0 because authoritative-status (bkg-td0.2) sees
+// the freshly-closed beads as closed and emits no findings.
+func runStaleBeadsClose(cmd *cobra.Command, repo string, r staleship.Report, exclude []string, force, apply, jsonOut bool) {
+	out := cmd.OutOrStdout()
+	plan, err := staleship.PlanCloses(repo, r.Findings, exclude, force)
+	if err != nil {
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "error: plan failed: %s\n", err)
+		silentExit(1)
+		return
+	}
+	summary := staleship.ApplyCloses(repo, plan, !apply)
+
+	if jsonOut {
+		payload := map[string]any{
+			"branch":   r.Branch,
+			"prefix":   r.Prefix,
+			"lookback": r.Lookback,
+			"worst":    string(r.Worst()),
+			"findings": staleshipFindingsToJSON(r.Findings),
+			"close": map[string]any{
+				"dry_run":          summary.DryRun,
+				"applied":          summary.Apply,
+				"closed":           summary.Closed,
+				"skipped_blocked":  skippedBlockedJSON(summary.SkippedBlocked),
+				"skipped_excluded": summary.SkippedExcluded,
+				"failed":           failedJSON(summary.Failed),
+				"plan":             actionsJSON(summary.Actions),
+				"counts": map[string]int{
+					"closed":           len(summary.Closed),
+					"skipped_blocked":  len(summary.SkippedBlocked),
+					"skipped_excluded": len(summary.SkippedExcluded),
+					"failed":           len(summary.Failed),
+				},
+			},
+		}
+		b, _ := json.MarshalIndent(payload, "", "  ")
+		_, _ = out.Write(b)
+		_, _ = out.Write([]byte("\n"))
+	} else {
+		mode := "DRY-RUN"
+		if apply {
+			mode = "APPLY"
+		}
+		_, _ = fmt.Fprintf(out, "[%s] %d action(s)\n", mode, len(summary.Actions))
+		for _, a := range summary.Actions {
+			line := fmt.Sprintf("  %-22s %s  reason=%q", a.Decision, a.BeadID, a.Reason)
+			if a.Blocker != "" {
+				line += "  blocker=" + a.Blocker
+			}
+			if a.Error != "" {
+				line += "  error=" + a.Error
+			}
+			if a.Applied {
+				line += "  ✓ closed"
+			}
+			_, _ = fmt.Fprintln(out, line)
+		}
+		_, _ = fmt.Fprintf(out,
+			"\nsummary: closed=%d  skipped_blocked=%d  skipped_excluded=%d  failed=%d\n",
+			len(summary.Closed), len(summary.SkippedBlocked),
+			len(summary.SkippedExcluded), len(summary.Failed),
+		)
+	}
+
+	if r.Worst() == staleship.RED {
+		silentExit(2)
+	}
+}
+
+func skippedBlockedJSON(xs []staleship.CloseAction) []map[string]any {
+	out := make([]map[string]any, 0, len(xs))
+	for _, a := range xs {
+		out = append(out, map[string]any{
+			"id":      a.BeadID,
+			"blocker": a.Blocker,
+			"reason":  a.Reason,
+		})
+	}
+	return out
+}
+
+func failedJSON(xs []staleship.CloseAction) []map[string]any {
+	out := make([]map[string]any, 0, len(xs))
+	for _, a := range xs {
+		out = append(out, map[string]any{
+			"id":     a.BeadID,
+			"reason": a.Reason,
+			"error":  a.Error,
+		})
+	}
+	return out
+}
+
+func actionsJSON(xs []staleship.CloseAction) []map[string]any {
+	out := make([]map[string]any, 0, len(xs))
+	for _, a := range xs {
+		row := map[string]any{
+			"id":       a.BeadID,
+			"reason":   a.Reason,
+			"decision": string(a.Decision),
+			"applied":  a.Applied,
+		}
+		if a.Blocker != "" {
+			row["blocker"] = a.Blocker
+		}
+		if a.Error != "" {
+			row["error"] = a.Error
+		}
+		out = append(out, row)
+	}
+	return out
 }
 
 // parseStatusSource maps the --source flag to the staleship enum.
