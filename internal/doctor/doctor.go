@@ -26,6 +26,7 @@ import (
 	"github.com/theaichimera/beekeeper-go/internal/lease"
 	"github.com/theaichimera/beekeeper-go/internal/prbeads"
 	bkproject "github.com/theaichimera/beekeeper-go/internal/project"
+	"github.com/theaichimera/beekeeper-go/internal/stalewip"
 	"github.com/theaichimera/beekeeper-go/internal/syncbranch"
 	"github.com/theaichimera/beekeeper-go/internal/trunksync"
 )
@@ -67,8 +68,26 @@ type Report struct {
 
 // --- public entrypoint --------------------------------------------------
 
-// Run scans `paths` and produces a Report. Mirrors Python doctor.run.
+// Opts controls optional checks. Zero-value means "all defaults".
+//
+// StaleDays is the threshold for the stale-WIP check (in_progress beads
+// untouched for more than N days). 0 == default (7 days). Negative
+// disables the check entirely.
+type Opts struct {
+	MaxDepth  int
+	StaleDays int
+}
+
+// Run scans `paths` and produces a Report. Default-ed shortcut for
+// callers that don't want to construct an Opts.
 func Run(paths []string, maxDepth int) Report {
+	return RunWithOpts(paths, Opts{MaxDepth: maxDepth})
+}
+
+// RunWithOpts is the option-bearing entrypoint. Mirrors Python
+// doctor.run + the new stale-wip threshold knob (bkg-bqa.2).
+func RunWithOpts(paths []string, opts Opts) Report {
+	maxDepth := opts.MaxDepth
 	if maxDepth <= 0 {
 		maxDepth = bkproject.DefaultMaxDepth
 	}
@@ -82,13 +101,18 @@ func Run(paths []string, maxDepth int) Report {
 		}
 	}
 
+	staleDays := opts.StaleDays
+	if staleDays == 0 {
+		staleDays = stalewip.DefaultStaleDays
+	}
+
 	r := Report{
 		GeneratedAt:  float64(time.Now().Unix()),
 		ScannedPaths: scanned,
 		Worst:        GREEN,
 	}
 	for _, p := range projects {
-		ph := diagnose(p)
+		ph := diagnose(p, staleDays)
 		r.Projects = append(r.Projects, ph)
 		if sevOrder[ph.Severity] > sevOrder[r.Worst] {
 			r.Worst = ph.Severity
@@ -99,7 +123,7 @@ func Run(paths []string, maxDepth int) Report {
 
 // --- diagnose -----------------------------------------------------------
 
-func diagnose(p bkproject.Project) ProjectHealth {
+func diagnose(p bkproject.Project, staleDays int) ProjectHealth {
 	// IMPORTANT: read daemon state BEFORE any bd shell-out. Python's
 	// `bd config get` self-heals a stale daemon.pid otherwise.
 	daemon := bkproject.ReadDaemonState(p)
@@ -117,6 +141,7 @@ func diagnose(p bkproject.Project) ProjectHealth {
 	checks = append(checks, checkLease(p)...)
 	checks = append(checks, checkIdentity(p)...)
 	checks = append(checks, checkPRBeads(p, gitState)...)
+	checks = append(checks, checkStaleWIP(p, staleDays)...)
 
 	ph := ProjectHealth{
 		ProjectRoot: p.Root,
@@ -571,6 +596,38 @@ func checkPRBeads(p bkproject.Project, g bkproject.GitState) []Check {
 			"Run `bk guard pr-beads --base %s --head %s` for detail. "+
 				"Rebase / merge `%s` into your branch and re-export the JSONL.",
 			base, head, base,
+		),
+	}}
+}
+
+// --- check_stale_wip ---------------------------------------------------
+
+// checkStaleWIP flags in_progress beads parked > staleDays. YELLOW
+// only — stale WIP is a heads-up, not a CI gate. Silent when the
+// project is clean. staleDays<=0 disables the check.
+func checkStaleWIP(p bkproject.Project, staleDays int) []Check {
+	if staleDays <= 0 {
+		return nil
+	}
+	r := stalewip.Scan([]string{p.Root}, 1, staleDays, time.Now())
+	if r.Count() == 0 {
+		return nil
+	}
+	oldest, _ := r.Oldest()
+	msg := fmt.Sprintf(
+		"%d in_progress bead(s) stale >%dd (oldest %.1fd: %s).",
+		r.Count(), staleDays, oldest.AgeDays, oldest.ID,
+	)
+	return []Check{{
+		Name:     "stale-wip",
+		Severity: YELLOW,
+		Message:  msg,
+		Remediation: fmt.Sprintf(
+			"Review with `bk board --status in_progress %s`. "+
+				"Move work to closed via `bd close <id> --reason \"...\"`, "+
+				"or reset to open if it isn't actually in flight. "+
+				"Adjust the threshold with `--stale-days N` or `0` to disable.",
+			p.Root,
 		),
 	}}
 }
