@@ -3,10 +3,12 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/theaichimera/beekeeper-go/internal/board"
+	"github.com/theaichimera/beekeeper-go/internal/stalewip"
 )
 
 func newBoardCmd() *cobra.Command {
@@ -18,6 +20,7 @@ func newBoardCmd() *cobra.Command {
 		leaseGaps bool
 		strict    bool
 		summary   bool
+		staleDays int
 	)
 	c := &cobra.Command{
 		Use:   "board [path...]",
@@ -25,9 +28,10 @@ func newBoardCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			paths := defaultPaths(args)
 			r := board.Scan(paths, maxDepth)
+			staleCount := computeStaleWIPCount(paths, maxDepth, staleDays)
 			out := cmd.OutOrStdout()
 			if jsonOut {
-				payload := boardJSONPayload(r)
+				payload := boardJSONPayloadWithStale(r, staleCount)
 				b, _ := json.MarshalIndent(payload, "", "  ")
 				_, _ = out.Write(b)
 				_, _ = out.Write([]byte("\n"))
@@ -37,7 +41,7 @@ func newBoardCmd() *cobra.Command {
 				return nil
 			}
 			if summary {
-				printBoardSummary(cmd, r)
+				printBoardSummary(cmd, r, staleCount, staleDays)
 				if strict && r.Totals()["lease_gaps"] > 0 {
 					silentExit(1)
 				}
@@ -111,13 +115,33 @@ func newBoardCmd() *cobra.Command {
 	c.Flags().BoolVar(&leaseGaps, "lease-gaps", false, "show only in_progress issues with no assignee")
 	c.Flags().BoolVar(&strict, "strict", false, "exit 1 when any lease gaps exist (CI)")
 	c.Flags().BoolVar(&summary, "summary", false, "print rollup only (totals, status / priority breakdowns); no per-bead dump")
+	c.Flags().IntVar(&staleDays, "stale-days", 0,
+		"stale-WIP threshold for the in_progress count surfaced in --summary / --json; 0 = default 7d, negative = disable")
 	return c
+}
+
+// computeStaleWIPCount runs the stale-WIP detector to populate the
+// `stale_wip_count` field in --summary and --json. Pure read; never
+// mutates state. Mirrors the doctor-side default semantics: 0 ->
+// default 7d; negative -> disabled (returns 0).
+func computeStaleWIPCount(paths []string, maxDepth, staleDays int) int {
+	if staleDays < 0 {
+		return 0
+	}
+	threshold := staleDays
+	if threshold == 0 {
+		threshold = stalewip.DefaultStaleDays
+	}
+	r := stalewip.Scan(paths, maxDepth, threshold, time.Now())
+	return r.Count()
 }
 
 // printBoardSummary renders the human-readable rollup. Mirrors the
 // JSON aggregate's keys 1:1 so an operator reading the text can map
-// straight to fields in `--json`.
-func printBoardSummary(cmd *cobra.Command, r board.Report) {
+// straight to fields in `--json`. The stale-WIP count is threaded in
+// from the caller (cmd-level concern; the board package itself does
+// not know about timestamps).
+func printBoardSummary(cmd *cobra.Command, r board.Report, staleCount, staleDays int) {
 	out := cmd.OutOrStdout()
 	s := r.Aggregate()
 	if s.Total == 0 {
@@ -133,7 +157,6 @@ func printBoardSummary(cmd *cobra.Command, r board.Report) {
 		s.ByStatus["other"],
 		s.PercentComplete,
 	)
-	// Active-by-priority. Iterate sorted by integer key with -1 (no priority) last.
 	keys := make([]int, 0, len(s.ActiveByPriority))
 	for k := range s.ActiveByPriority {
 		keys = append(keys, k)
@@ -150,7 +173,12 @@ func printBoardSummary(cmd *cobra.Command, r board.Report) {
 		parts = append(parts, fmt.Sprintf("P?:%d", n))
 	}
 	_, _ = fmt.Fprintf(out, "ACTIVE BY PRIORITY  %s\n", joinSpaces(parts))
-	_, _ = fmt.Fprintf(out, "WIP  in_progress=%d  lease_gaps=%d\n", s.InProgress, s.LeaseGaps)
+	threshold := staleDays
+	if threshold == 0 {
+		threshold = stalewip.DefaultStaleDays
+	}
+	_, _ = fmt.Fprintf(out, "WIP  in_progress=%d  lease_gaps=%d  stale>%dd=%d\n",
+		s.InProgress, s.LeaseGaps, threshold, staleCount)
 }
 
 func sortInts(xs []int) {
@@ -205,6 +233,13 @@ func printBoardRow(cmd *cobra.Command, i board.Issue) {
 }
 
 func boardJSONPayload(r board.Report) map[string]any {
+	return boardJSONPayloadWithStale(r, 0)
+}
+
+// boardJSONPayloadWithStale folds a caller-supplied stale-WIP count
+// into the aggregate `summary.stale_wip_count` field. Callers that
+// can't compute it (e.g. older tests) pass 0.
+func boardJSONPayloadWithStale(r board.Report, staleWIP int) map[string]any {
 	projs := make([]map[string]any, 0, len(r.Projects))
 	for _, pb := range r.Projects {
 		projs = append(projs, map[string]any{
@@ -231,7 +266,7 @@ func boardJSONPayload(r board.Report) map[string]any {
 			"percent_complete":   roundPercent(s.PercentComplete),
 			"in_progress_count":  s.InProgress,
 			"lease_gaps_count":   s.LeaseGaps,
-			"stale_wip_count":    s.StaleWIP,
+			"stale_wip_count":    staleWIP,
 		},
 	}
 }
