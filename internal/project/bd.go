@@ -17,3 +17,13 @@ var BdRunner execwrap.Runner = execwrap.Default
 func bdRun(args []string, cwd string) (int, string, string, error) {
 	return BdRunner(args, cwd, 10*time.Second)
 }
+
+// BdRun is the exported variant for callers in other packages. The
+// timeout is bumped to 30 s — `bd list --json` on a large backlog
+// (627 records observed) is heavier than `bd config get`.
+func BdRun(args []string, cwd string, timeout time.Duration) (int, string, string, error) {
+	if timeout == 0 {
+		timeout = 30 * time.Second
+	}
+	return BdRunner(args, cwd, timeout)
+}
