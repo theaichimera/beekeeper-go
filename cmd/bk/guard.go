@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 
 	"github.com/spf13/cobra"
 
@@ -147,33 +146,10 @@ func normalizePolicy(p string) (prbeads.Policy, bool) {
 	return "", false
 }
 
-// resolveBaseRef applies the documented fallback chain: explicit
-// --base flag -> GITHUB_BASE_REF env -> origin/<default-branch> ->
-// "main". Returns ("", false) when none of the candidates resolves.
+// resolveBaseRef wraps prbeads.ResolveBaseRef for the CLI, which
+// honors $GITHUB_BASE_REF as a CI fallback.
 func resolveBaseRef(repo, explicit string) (string, bool) {
-	candidates := []string{}
-	if explicit != "" {
-		candidates = append(candidates, explicit)
-	}
-	if env := os.Getenv("GITHUB_BASE_REF"); env != "" {
-		candidates = append(candidates,
-			"origin/"+env,
-			env,
-		)
-	}
-	if def, ok := git.DefaultRemoteBranch(repo, "origin"); ok {
-		candidates = append(candidates,
-			"origin/"+def,
-			def,
-		)
-	}
-	candidates = append(candidates, "origin/main", "main")
-	for _, ref := range candidates {
-		if git.RefExists(repo, ref) {
-			return ref, true
-		}
-	}
-	return "", false
+	return prbeads.ResolveBaseRef(repo, explicit, true)
 }
 
 func prbeadsFindingsToJSON(fs []prbeads.Finding) []map[string]any {
