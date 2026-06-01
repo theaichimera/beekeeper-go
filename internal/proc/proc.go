@@ -15,8 +15,10 @@
 // PID liveness uses kill(pid, 0): ProcessLookupError -> dead;
 // PermissionError -> alive (different user).
 //
-// The cwd lookup is the only platform-sensitive bit; it lives in
-// proc_darwin.go (lsof -p) and proc_linux.go (/proc/<pid>/cwd).
+// The platform-sensitive bits live in proc_unix.go (kill(2) liveness),
+// proc_darwin.go (lsof -p cwd), proc_linux.go (/proc/<pid>/cwd), and
+// proc_windows.go (OpenProcess liveness; cwd lookup is unsupported and
+// falls back to the cmdline path token).
 package proc
 
 import (
@@ -24,7 +26,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	execwrap "github.com/theaichimera/beekeeper-go/internal/exec"
@@ -54,15 +55,7 @@ func PidAlive(pid int) bool {
 	if pid <= 0 {
 		return false
 	}
-	err := syscall.Kill(pid, 0)
-	if err == nil {
-		return true
-	}
-	if err == syscall.EPERM {
-		return true
-	}
-	// ESRCH or anything else => not alive (or indistinguishable).
-	return false
+	return pidAlive(pid)
 }
 
 // EnumerateBdDaemons runs `ps` and returns every `bd daemon` process.
