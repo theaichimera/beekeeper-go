@@ -206,6 +206,18 @@ func TestCLIGuardStaleBeadsShipTypesFlag(t *testing.T) {
 	}
 }
 
+func TestCLIGuardStaleBeadsSourceFlagValidation(t *testing.T) {
+	dir := initStaleBeadsRepo(t,
+		[]map[string]any{{"id": "demo-x", "status": "open"}},
+		nil,
+	)
+	_, _, rc := runCmd(t, "guard", "stale-beads",
+		"--repo", dir, "--branch", "main", "--source", "wat")
+	if rc != 64 {
+		t.Fatalf("rc=%d want 64 on bad --source", rc)
+	}
+}
+
 func TestCLIGuardStaleBeadsJSONShape(t *testing.T) {
 	dir := initStaleBeadsRepo(t,
 		[]map[string]any{{"id": "demo-x", "status": "in_progress"}},
