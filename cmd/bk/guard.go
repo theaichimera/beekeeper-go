@@ -3,11 +3,14 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
 
 	"github.com/theaichimera/beekeeper-go/internal/daemons"
+	"github.com/theaichimera/beekeeper-go/internal/git"
 	"github.com/theaichimera/beekeeper-go/internal/guard"
+	"github.com/theaichimera/beekeeper-go/internal/prbeads"
 	"github.com/theaichimera/beekeeper-go/internal/syncbranch"
 )
 
@@ -19,7 +22,174 @@ func newGuardCmd() *cobra.Command {
 	c.AddCommand(newGuardDBCmd())
 	c.AddCommand(newGuardSyncBranchCmd())
 	c.AddCommand(newGuardDaemonCmd())
+	c.AddCommand(newGuardPRBeadsCmd())
 	return c
+}
+
+// `bk guard pr-beads` — content-aware backlog-regression gate.
+func newGuardPRBeadsCmd() *cobra.Command {
+	var (
+		base    string
+		head    string
+		policy  string
+		jsonOut bool
+		strict  bool
+		repo    string
+	)
+	c := &cobra.Command{
+		Use:   "pr-beads",
+		Short: "Detect backlog regressions when merging head into base.",
+		Long: `Diff .beads/issues.jsonl between two refs and report any change that
+would rewind backlog state on merge: status rewinds, dropped assignees,
+stale timestamps, dropped records.
+
+Defaults: base = $GITHUB_BASE_REF or remote default branch; head = HEAD.
+
+Policies:
+  regression (default): only regressions fail.
+  no-beads:             ANY commit in base..head touching the JSONL fails.
+
+Exit codes match bk's contract:
+  0 clean | 1 generic / --strict YELLOW | 2 RED | 64 missing flag | 127 git missing.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if !git.Available() {
+				fmt.Fprintln(cmd.ErrOrStderr(), "error: `git` not found on PATH.")
+				silentExit(127)
+				return nil
+			}
+			if repo == "" {
+				repo = "."
+			}
+			pol, ok := normalizePolicy(policy)
+			if !ok {
+				fmt.Fprintf(cmd.ErrOrStderr(),
+					"error: invalid --policy %q (want regression|no-beads).\n", policy)
+				silentExit(64)
+				return nil
+			}
+			resolvedBase, ok := resolveBaseRef(repo, base)
+			if !ok {
+				fmt.Fprintf(cmd.ErrOrStderr(),
+					"error: cannot resolve --base; pass --base explicitly or set GITHUB_BASE_REF.\n")
+				silentExit(64)
+				return nil
+			}
+			resolvedHead := head
+			if resolvedHead == "" {
+				resolvedHead = "HEAD"
+			}
+			if !git.RefExists(repo, resolvedHead) {
+				fmt.Fprintf(cmd.ErrOrStderr(), "error: head ref %q not found.\n", resolvedHead)
+				silentExit(64)
+				return nil
+			}
+
+			r, err := prbeads.Diagnose(repo, resolvedBase, resolvedHead, pol)
+			if err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "error: %s\n", err)
+				silentExit(1)
+				return nil
+			}
+
+			out := cmd.OutOrStdout()
+			if jsonOut {
+				payload := map[string]any{
+					"base":     r.BaseRef,
+					"head":     r.HeadRef,
+					"policy":   string(r.Policy),
+					"worst":    string(r.Worst()),
+					"findings": prbeadsFindingsToJSON(r.Findings),
+				}
+				b, _ := json.MarshalIndent(payload, "", "  ")
+				_, _ = out.Write(b)
+				_, _ = out.Write([]byte("\n"))
+			} else if len(r.Findings) == 0 {
+				fmt.Fprintf(out,
+					"OK — no backlog regressions between %s and %s (policy=%s).\n",
+					r.BaseRef, r.HeadRef, r.Policy)
+			} else {
+				fmt.Fprintf(out, "Base: %s\nHead: %s\nPolicy: %s\n\n",
+					r.BaseRef, r.HeadRef, r.Policy)
+				for _, f := range r.Findings {
+					fmt.Fprintf(out, "[%s] %s  %s\n",
+						upper(string(f.Severity)), f.Kind, f.ID)
+					fmt.Fprintf(out, "        %s\n", f.Message)
+				}
+			}
+
+			switch r.Worst() {
+			case prbeads.RED:
+				silentExit(2)
+			case prbeads.YELLOW:
+				if strict {
+					silentExit(1)
+				}
+			}
+			return nil
+		},
+	}
+	c.Flags().StringVar(&base, "base", "", "base ref (default: $GITHUB_BASE_REF or remote default branch)")
+	c.Flags().StringVar(&head, "head", "", "head ref (default: HEAD)")
+	c.Flags().StringVar(&policy, "policy", "regression", "regression|no-beads")
+	c.Flags().BoolVar(&jsonOut, "json", false, "emit JSON")
+	c.Flags().BoolVar(&strict, "strict", false, "exit 1 on YELLOW as well as RED")
+	c.Flags().StringVar(&repo, "repo", "", "repo path (default: current dir)")
+	return c
+}
+
+func normalizePolicy(p string) (prbeads.Policy, bool) {
+	switch p {
+	case "regression", "":
+		return prbeads.PolicyRegression, true
+	case "no-beads":
+		return prbeads.PolicyNoBeads, true
+	}
+	return "", false
+}
+
+// resolveBaseRef applies the documented fallback chain: explicit
+// --base flag -> GITHUB_BASE_REF env -> origin/<default-branch> ->
+// "main". Returns ("", false) when none of the candidates resolves.
+func resolveBaseRef(repo, explicit string) (string, bool) {
+	candidates := []string{}
+	if explicit != "" {
+		candidates = append(candidates, explicit)
+	}
+	if env := os.Getenv("GITHUB_BASE_REF"); env != "" {
+		candidates = append(candidates,
+			"origin/"+env,
+			env,
+		)
+	}
+	if def, ok := git.DefaultRemoteBranch(repo, "origin"); ok {
+		candidates = append(candidates,
+			"origin/"+def,
+			def,
+		)
+	}
+	candidates = append(candidates, "origin/main", "main")
+	for _, ref := range candidates {
+		if git.RefExists(repo, ref) {
+			return ref, true
+		}
+	}
+	return "", false
+}
+
+func prbeadsFindingsToJSON(fs []prbeads.Finding) []map[string]any {
+	out := make([]map[string]any, 0, len(fs))
+	for _, f := range fs {
+		out = append(out, map[string]any{
+			"id":         f.ID,
+			"field":      f.Field,
+			"kind":       f.Kind,
+			"base_value": f.BaseValue,
+			"head_value": f.HeadValue,
+			"severity":   string(f.Severity),
+			"message":    f.Message,
+		})
+	}
+	return out
 }
 
 // `bk guard db` — DB-in-file-sync guardrail.
