@@ -90,6 +90,7 @@ only at the projects `bk` inspects.
 | `bk guard db` | Catch a bead DB living inside a file-sync folder (`--fix --destination DIR`) |
 | `bk guard sync-branch` | Catch bead commits stranded off the sync branch (`--set BRANCH`) |
 | `bk guard daemon` | Catch duplicate daemons & silent remote-helper failures |
+| `bk guard pr-beads` | Catch backlog regressions when merging head into base (`--policy regression\|no-beads`) |
 | `bk identity check` / `normalize` | Detect & fix actor-handle drift in bead JSONL |
 | `bk trunk-sync` | Reconcile bead JSONL drift between trunk and the sync branch (`--apply`) |
 | `bk lease claim` / `release` / `list` | Per-issue lease discipline via canonical identity |
@@ -168,6 +169,79 @@ test that prevents `trunk-sync` replay commits from false-flagging themselves).
 bk guard sync-branch ~/code
 bk guard sync-branch . --set beads-sync   # writes .beads/config.json (refuses on live daemon)
 ```
+
+### `bk guard pr-beads` — backlog-regression gate for PRs
+
+Diffs `.beads/issues.jsonl` between two refs and reports any change that would REWIND
+backlog state on merge: status rewinds, dropped assignees, stale timestamps, dropped
+records. The "stale-snapshot stomp" — a feature branch carrying an old JSONL whose
+merge silently reverts work the daemon completed on `main` while the branch lived.
+
+```bash
+bk guard pr-beads --base main --head HEAD                    # local check
+bk guard pr-beads --base origin/main --head feature/x        # CI form
+bk guard pr-beads --policy no-beads                          # ANY .beads diff fails
+bk guard pr-beads --json | jq '.findings[] | select(.kind=="status-rewind")'
+```
+
+Defaults: `--base = $GITHUB_BASE_REF` (CI) → remote default branch → `origin/main` → `main`;
+`--head = HEAD`.
+
+**Detection** (per id present in BOTH base and head):
+
+| Signal | Trigger | Severity |
+|---|---|---|
+| Status rewind | rank `open=0`, `in_progress=1`, `blocked=1`, `closed=2`; head < base | RED |
+| Assignee rewind | base set, head clears or changes | RED |
+| Stale timestamp | both records carry parsable `updated_at` (or `modified`); head < base | RED |
+| Dropped record | id in base, absent in head | RED |
+| Forward-only | new ids on head, status advances | GREEN |
+
+**Policies:**
+
+| `--policy` | Use case |
+|---|---|
+| `regression` (default) | Repos that allow bead edits anywhere — only the four signals fail. |
+| `no-beads` | Repos that confine bead writes to a sync branch — ANY commit in `base..head` touching the JSONL fails. |
+
+#### GitHub Actions
+
+Drop this job into `.github/workflows/pr-beads.yml` to gate every pull request:
+
+```yaml
+name: pr-beads
+on:
+  pull_request:
+
+jobs:
+  pr-beads:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # pr-beads needs both refs reachable
+      - name: Install bk
+        run: |
+          curl -sL https://github.com/theaichimera/beekeeper-go/releases/latest/download/beekeeper-go_linux_x86_64.tar.gz | tar -xz
+          sudo install -m 0755 bk /usr/local/bin/bk
+      - name: Guard pr-beads
+        env:
+          GITHUB_BASE_REF: ${{ github.base_ref }}
+        run: bk guard pr-beads --head HEAD --json
+```
+
+The `fetch-depth: 0` is required so both `$GITHUB_BASE_REF` and the PR head are
+reachable from the runner's clone. Setting `--policy no-beads` instead of the default
+makes ANY `.beads/issues.jsonl` modification fail the check — useful for repos that
+keep bead writes on a dedicated sync branch.
+
+#### Pre-push hook integration
+
+`bk install-hooks` plumbs an opt-in `pr-beads` invocation behind
+`BEADKEEPER_PRBEADS_POLICY`. Default is `off` (the check never fires until you opt in).
+Set to `regression` or `no-beads` to enable; combine with `BEADKEEPER_BLOCK_ON_RED=1` to
+make a finding blocking instead of a warning. `BEADKEEPER_SKIP_HOOK=1` is the same
+escape hatch as for the doctor check.
 
 ### `bk guard daemon` — daemon hygiene
 
