@@ -263,8 +263,10 @@ bk guard stale-beads --prefix demo --lookback-days 30
 - The subject must be in **one of two shapes**:
   - **Conventional-commit scope**: `feat(<id>): ...`, `<id>: ...`, `[<id>] ...`
   - **PR-merge marker present**: subject ends with `(#N)` AND the id is token-bounded anywhere
+- The conventional-commit **type** must be in the implementation allowlist: `feat`, `fix`, `perf`, `refactor` (configurable via `--ship-types`).
+- Type `spec` and scope `bd` / `beads` are **never** shipping (bead-management commits — filing, spec writing, status updates).
 
-Tangential mentions like `chore: bump deps — see <id> for context` are deliberately NOT flagged.
+Tangential mentions like `chore: bump deps — see <id> for context`, bead-filing commits like `chore(bd): file <id>`, and spec commits like `spec(<id>): file epic` are deliberately NOT flagged.
 
 **JSON shape** (`--json`) — each finding includes a `bd_close_command` field shaped so an
 agent can drive closure deterministically:
