@@ -43,6 +43,7 @@ import (
 	"time"
 
 	"github.com/theaichimera/beekeeper-go/internal/git"
+	bkproject "github.com/theaichimera/beekeeper-go/internal/project"
 )
 
 // JSONLRelPath duplicates the bead JSONL constant — this package is
@@ -91,7 +92,33 @@ type Opts struct {
 	// implementation work. Spec rules are codified in nonShippingScopes
 	// and parseConvCommit.
 	AllowedShipTypes []string
+
+	// StatusSource controls where bead status is read from:
+	//
+	//   StatusSourceAuto   (default): try `bd list --json`, fall back
+	//                                  to JSONL on bd error.
+	//   StatusSourceBd:                require `bd list --json`; error
+	//                                  when bd is unavailable.
+	//   StatusSourceJSONL:              read `.beads/issues.jsonl` only
+	//                                  (legacy bkg-bqa.3 behavior).
+	//
+	// The default uses bd as the authoritative source per bkg-td0.2 —
+	// `.beads/issues.jsonl` lags the bd SQLite DB after a `bd close`
+	// and produced false positives in the dogfood run.
+	StatusSource StatusSource
 }
+
+// StatusSource selects the bead-status read strategy. See Opts.
+type StatusSource int
+
+const (
+	// StatusSourceAuto tries bd first, then JSONL.
+	StatusSourceAuto StatusSource = iota
+	// StatusSourceBd reads only from bd (errors if bd unavailable).
+	StatusSourceBd
+	// StatusSourceJSONL reads only the JSONL on disk.
+	StatusSourceJSONL
+)
 
 // DefaultShipTypes is the default conventional-commit type allowlist:
 // implementation work that genuinely lands a bead. Bumped to a public
@@ -146,7 +173,7 @@ func DiagnoseWithOpts(repo, branch, prefix string, opts Opts) (Report, error) {
 
 	allowed := allowedTypeSet(opts.AllowedShipTypes)
 
-	openIDs, err := readOpenIssueIDs(repo)
+	openIDs, err := readOpenIssueIDsFrom(repo, opts.StatusSource)
 	if err != nil {
 		return r, err
 	}
@@ -408,6 +435,134 @@ func DerivePrefix(repo string) (string, bool) {
 		return id[:i], true
 	}
 	return "", false
+}
+
+// readOpenIssueIDsFrom returns id -> status keyed on the selected
+// source. The bkg-td0.2 default (StatusSourceAuto) MERGES `bd list
+// --json` output with `.beads/issues.jsonl`: bd's status is
+// authoritative for ids it knows about (this is the fix — `bd close
+// <id>` flushes the bd DB before the JSONL gets re-written), while
+// the JSONL covers ids that bd hasn't ingested yet (uninitialized
+// SQLite DB on a fresh clone, etc.).
+//
+// Read paths:
+//
+//	StatusSourceAuto  - merge: bd authoritative for ids it has;
+//	                    JSONL covers the rest.
+//	StatusSourceBd    - bd only; error when bd is unavailable.
+//	StatusSourceJSONL - legacy bkg-bqa.3 behavior (JSONL only).
+func readOpenIssueIDsFrom(repo string, src StatusSource) (map[string]string, error) {
+	switch src {
+	case StatusSourceJSONL:
+		return readOpenIssueIDs(repo)
+	case StatusSourceBd:
+		all, err := readAllIssueIDsViaBd(repo)
+		if err != nil {
+			return nil, err
+		}
+		return filterOpen(all), nil
+	default: // StatusSourceAuto
+		bdAll, bdErr := readAllIssueIDsViaBd(repo)
+		jsonlAll, jsonlErr := readAllIssueIDs(repo)
+		if bdErr != nil && jsonlErr != nil {
+			return nil, fmt.Errorf("both bd and jsonl reads failed (bd=%v, jsonl=%v)", bdErr, jsonlErr)
+		}
+		// Merge: start from JSONL (covers ids bd hasn't ingested),
+		// then OVERLAY bd (authoritative for ids it knows about,
+		// including post-close transitions).
+		merged := map[string]string{}
+		if jsonlErr == nil {
+			for id, st := range jsonlAll {
+				merged[id] = st
+			}
+		}
+		if bdErr == nil {
+			for id, st := range bdAll {
+				merged[id] = st
+			}
+		}
+		return filterOpen(merged), nil
+	}
+}
+
+// filterOpen keeps only open/in_progress entries.
+func filterOpen(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for id, st := range in {
+		if st == "open" || st == "in_progress" {
+			out[id] = st
+		}
+	}
+	return out
+}
+
+// readAllIssueIDsViaBd returns id -> status for EVERY bead bd knows
+// about (open / in_progress / blocked / closed). Closed entries are
+// returned so the merge in readOpenIssueIDsFrom can use them to
+// override stale JSONL "open" rows. Returns (nil, err) when bd is
+// unavailable or its output can't be parsed.
+func readAllIssueIDsViaBd(repo string) (map[string]string, error) {
+	rc, stdout, stderr, err := bkproject.BdRun([]string{"bd", "list", "--json"}, repo, 30*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("bd list --json: %w", err)
+	}
+	if rc != 0 {
+		if rc == 127 {
+			return nil, fmt.Errorf("bd not on PATH")
+		}
+		return nil, fmt.Errorf("bd list --json (rc=%d): %s", rc, strings.TrimSpace(stderr))
+	}
+	body := strings.TrimSpace(stdout)
+	if body == "" {
+		return map[string]string{}, nil
+	}
+	var recs []map[string]any
+	if err := json.Unmarshal([]byte(body), &recs); err != nil {
+		return nil, fmt.Errorf("bd list --json output not parseable: %w", err)
+	}
+	out := make(map[string]string, len(recs))
+	for _, rec := range recs {
+		id, _ := rec["id"].(string)
+		st, _ := rec["status"].(string)
+		if id == "" {
+			continue
+		}
+		out[id] = st
+	}
+	return out, nil
+}
+
+// readAllIssueIDs returns id -> status for EVERY record in the JSONL
+// (including closed). Used by the auto-merge path so callers can
+// reason about "what does the JSONL claim about this id?" before
+// overlaying bd's authoritative view.
+func readAllIssueIDs(repo string) (map[string]string, error) {
+	f, err := os.Open(filepath.Join(repo, JSONLRelPath))
+	if err != nil {
+		return nil, fmt.Errorf("cannot read %s: %w", JSONLRelPath, err)
+	}
+	defer f.Close()
+	out := map[string]string{}
+	sc := bufio.NewScanner(f)
+	buf := make([]byte, 0, 1024*1024)
+	sc.Buffer(buf, 16*1024*1024)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			continue
+		}
+		id, _ := rec["id"].(string)
+		st, _ := rec["status"].(string)
+		if id == "" {
+			continue
+		}
+		out[id] = st
+	}
+	return out, nil
 }
 
 // readOpenIssueIDs returns id -> status for every record whose status

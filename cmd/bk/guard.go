@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -36,6 +37,7 @@ func newGuardStaleBeadsCmd() *cobra.Command {
 		lookback  int
 		jsonOut   bool
 		shipTypes []string
+		source    string
 	)
 	c := &cobra.Command{
 		Use:   "stale-beads [path]",
@@ -91,9 +93,17 @@ Exit codes (per bk contract):
 				}
 			}
 
+			src, sok := parseStatusSource(source)
+			if !sok {
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
+					"error: invalid --source %q (want auto|bd|jsonl).\n", source)
+				silentExit(64)
+				return nil
+			}
 			r, err := staleship.DiagnoseWithOpts(repo, branch, prefix, staleship.Opts{
 				LookbackDays:     lookback,
 				AllowedShipTypes: shipTypes,
+				StatusSource:     src,
 			})
 			if err != nil {
 				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "error: %s\n", err)
@@ -147,7 +157,24 @@ Exit codes (per bk contract):
 	c.Flags().StringSliceVar(&shipTypes, "ship-types", nil,
 		"conventional-commit types treated as shipping (default: feat,fix,perf,refactor); "+
 			"`spec` and scope `bd`/`beads` are always non-shipping regardless")
+	c.Flags().StringVar(&source, "source", "auto",
+		"bead-status source: auto|bd|jsonl (default auto: bd authoritative, JSONL fallback)")
 	return c
+}
+
+// parseStatusSource maps the --source flag to the staleship enum.
+// "" / "auto" -> Auto, "bd" -> Bd, "jsonl" -> JSONL. Other values
+// surface as a 64 usage error.
+func parseStatusSource(s string) (staleship.StatusSource, bool) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "auto":
+		return staleship.StatusSourceAuto, true
+	case "bd":
+		return staleship.StatusSourceBd, true
+	case "jsonl":
+		return staleship.StatusSourceJSONL, true
+	}
+	return 0, false
 }
 
 func staleshipFindingsToJSON(fs []staleship.Finding) []map[string]any {

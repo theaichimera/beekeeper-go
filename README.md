@@ -268,6 +268,12 @@ bk guard stale-beads --prefix demo --lookback-days 30
 
 Tangential mentions like `chore: bump deps — see <id> for context`, bead-filing commits like `chore(bd): file <id>`, and spec commits like `spec(<id>): file epic` are deliberately NOT flagged.
 
+**Status source** — `--source auto` (default) reads bead status from `bd list --json` first
+(authoritative; reflects post-`bd close` state immediately) and merges with `.beads/issues.jsonl`
+for ids bd hasn't ingested yet (e.g. fresh clones with no SQLite DB). `--source bd` requires bd;
+`--source jsonl` reads only the on-disk JSONL (the legacy behavior, useful when bd is unreachable
+from the runner).
+
 **JSON shape** (`--json`) — each finding includes a `bd_close_command` field shaped so an
 agent can drive closure deterministically:
 
