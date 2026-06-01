@@ -31,9 +31,13 @@ const BeadsDirName = ".beads"
 const DefaultMaxDepth = 4
 
 // SkipDirs is the set of directory names skipped during discovery.
-// Mirrors Python's `skip_names`.
+// Mirrors Python's `skip_names`, plus `.claude` (bkg-x25): the
+// `.claude/worktrees/<name>/.beads/` agent-isolation copies are not
+// real projects and double-counted findings + emitted spurious
+// "git: not a working tree" rows.
 var SkipDirs = map[string]struct{}{
 	".git":          {},
+	".claude":       {},
 	"node_modules":  {},
 	".venv":         {},
 	"venv":          {},

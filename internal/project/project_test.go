@@ -80,6 +80,36 @@ func TestFindProjectsDiscoversNested(t *testing.T) {
 	}
 }
 
+// TestFindProjectsSkipsClaudeWorktreeBeads — bkg-x25.
+// `.claude/worktrees/<name>/.beads/` are agent-isolation copies, not
+// real projects. They must be skipped during discovery so doctor
+// doesn't double-count findings and emit spurious "not a working tree"
+// rows for them.
+func TestFindProjectsSkipsClaudeWorktreeBeads(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	// Real project at root.
+	if err := os.MkdirAll(filepath.Join(tmp, BeadsDirName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Worktree-copy that must NOT be discovered.
+	if err := os.MkdirAll(filepath.Join(tmp, ".claude", "worktrees", "wt1", BeadsDirName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Sibling agent-tooling junk under .claude must also stay invisible.
+	if err := os.MkdirAll(filepath.Join(tmp, ".claude", "agents", "x", BeadsDirName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got := FindProjects([]string{tmp}, 6)
+	if len(got) != 1 {
+		t.Fatalf("got %d projects, want 1: %v", len(got), got)
+	}
+	resolved, _ := filepath.EvalSymlinks(tmp)
+	if got[0].Root != resolved {
+		t.Fatalf("root=%q want %q", got[0].Root, resolved)
+	}
+}
+
 func TestFindProjectsHonorsMaxDepth(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
