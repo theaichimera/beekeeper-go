@@ -23,27 +23,49 @@ on-disk form: one statically-linked file, no Python interpreter, no venv.
 
 ## Install
 
-### Homebrew (recommended once the v0.1.0 tag ships)
+### Homebrew (macOS & Linux)
 
 ```bash
-brew tap theaichimera/tap
-brew install bk
+brew install theaichimera/tap/bk
 bk version
 ```
 
-The tap formula is at [`pkg/homebrew/Formula/bk.rb`](pkg/homebrew/Formula/bk.rb) for review.
-Goreleaser writes the live formula into `theaichimera/homebrew-tap` on every stable tag.
+Homebrew runs on both macOS and Linux, so this is the simplest route on either.
+(Equivalently: `brew tap theaichimera/tap && brew install bk`.) The tap formula is
+mirrored at [`pkg/homebrew/Formula/bk.rb`](pkg/homebrew/Formula/bk.rb) for review;
+goreleaser writes the live formula into `theaichimera/homebrew-tap` on every stable tag.
 
-### Direct download
+### Direct download (macOS, Linux, Windows)
 
-Each release ships statically-linked binaries for darwin + linux × amd64 + arm64. Grab the
-right archive from <https://github.com/theaichimera/beekeeper-go/releases>:
+Each release ships statically-linked binaries for **macOS, Linux, and Windows** on
+**amd64 + arm64**. Browse them at
+<https://github.com/theaichimera/beekeeper-go/releases/latest>. Asset names follow
+`beekeeper-go_<version>_<os>_<arch>` — `.tar.gz` for macOS/Linux, `.zip` for Windows.
+
+**macOS / Linux:**
 
 ```bash
-curl -L -o bk.tar.gz "https://github.com/theaichimera/beekeeper-go/releases/download/v0.1.0/beekeeper-go_0.1.0_darwin_arm64.tar.gz"
+VERSION=0.1.1          # set to the latest release tag (without the leading v)
+OS=linux               # darwin | linux
+ARCH=x86_64            # x86_64 | arm64
+curl -L -o bk.tar.gz "https://github.com/theaichimera/beekeeper-go/releases/download/v${VERSION}/beekeeper-go_${VERSION}_${OS}_${ARCH}.tar.gz"
 tar xf bk.tar.gz
-./bk version
+sudo install bk /usr/local/bin/bk     # or move ./bk anywhere on your PATH
+bk version
 ```
+
+**Windows (PowerShell):**
+
+```powershell
+$Version = "0.1.1"                     # set to the latest release tag (without the leading v)
+$Arch    = "x86_64"                    # x86_64 | arm64
+Invoke-WebRequest "https://github.com/theaichimera/beekeeper-go/releases/download/v$Version/beekeeper-go_${Version}_windows_$Arch.zip" -OutFile bk.zip
+Expand-Archive bk.zip -DestinationPath .
+.\bk.exe version
+```
+
+Move `bk.exe` into a directory on your `PATH` (or add its folder) to run `bk` from anywhere.
+Windows needs `git` on `PATH` for any command that touches a repo.
 
 ### From source
 
@@ -282,11 +304,10 @@ extensibility.
 - M2 — Read-only commands: ✅
 - M3 — Mutation + coordination: ✅
 - M4 — Test parity & diff harness: ✅
-- M5 — Distribution & cutover: 🚧 **this milestone**
+- M5 — Distribution & cutover: ✅
 - M6 — Coordination harness coverage: ✅
 
-The first stable release will be tagged `v0.1.0` once the orchestrator signs off on the
-release-tag and history-scrub steps.
+`v0.1.0` is released and public — install via Homebrew or a direct download above.
 
 ## License
 
