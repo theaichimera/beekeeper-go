@@ -1,0 +1,41 @@
+# Example GitHub Actions workflow for `bk guard pr-beads`.
+#
+# Drop into your repo as `.github/workflows/pr-beads.yml` to gate every
+# pull request on backlog regressions — status rewinds, dropped
+# assignees, stale timestamps, dropped records.
+#
+# Notes:
+#   - `fetch-depth: 0` is REQUIRED so both $GITHUB_BASE_REF and the PR
+#     head are reachable from the runner's clone.
+#   - The default --policy is `regression` (only regressions fail). Set
+#     to `no-beads` if your repo confines bead writes to a sync branch
+#     and you want ANY `.beads/issues.jsonl` modification on a PR to
+#     fail the check.
+#   - This job pulls the latest released `bk` binary directly. Pin to a
+#     specific tag (e.g. `v0.1.0`) for production use:
+#     `download/v0.1.0/beekeeper-go_v0.1.0_linux_x86_64.tar.gz`.
+
+name: pr-beads
+on:
+  pull_request:
+
+jobs:
+  pr-beads:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install bk
+        run: |
+          curl -sL \
+            https://github.com/theaichimera/beekeeper-go/releases/latest/download/beekeeper-go_linux_x86_64.tar.gz \
+            | tar -xz
+          sudo install -m 0755 bk /usr/local/bin/bk
+          bk version
+
+      - name: Guard pr-beads
+        env:
+          GITHUB_BASE_REF: ${{ github.base_ref }}
+        run: bk guard pr-beads --head HEAD --json
