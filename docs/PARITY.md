@@ -292,6 +292,7 @@ the user observes — they're language-level conveniences.
 | 7 | Path resolution | `/tmp/...` | `/private/tmp/...` (macOS resolved symlink) | macOS' `/tmp` is a symlink to `/private/tmp`. Harness collapses both. |
 | 8 | Refusal error wording | "refusing to apply: ... is alive for /...; stop the daemon and re-run" (Go) vs "...is alive. Stop the daemon and re-run." (Python) | trailing punctuation, capitalization | `golangci-lint`'s `revive.error-strings` rule. Harness substring-matches `daemon`, `divergent`, `dirty`, `working tree`, `index`, `conflict`. |
 | 9 | `bk board --json` aggregate summary | (no aggregate block; flat `projects` + `totals`) | adds `summary` (total / by_status / active_by_priority / percent_complete / in_progress_count / lease_gaps_count / stale_wip_count) plus per-project `by_status` / `active_by_priority` / `total` | bkg-bqa.1: agents need backlog rollups. Go-only forward feature; the existing `projects` / `totals` keys are unchanged. Harness drops the new keys via `requireJSONDeepEqualIgnoring`. |
+| 10 | `bk doctor` stale-wip check | (no such check) | adds YELLOW `stale-wip` row when an in_progress bead's `updated_at` is older than `--stale-days` (default 7d) | bkg-bqa.2: a real 627-bead review found 22 of 33 in_progress beads untouched >7d (oldest 26d). Go uses `time.RFC3339Nano` so TZ-offset + fractional-second timestamps (which jq's `fromdateiso8601` rejects) parse correctly. Go-only forward feature; silent on clean repos so doctor parity isn't broken. |
 
 ## 5. Running
 
