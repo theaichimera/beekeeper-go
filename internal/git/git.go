@@ -11,6 +11,7 @@
 package git
 
 import (
+	"os/exec"
 	"strings"
 	"time"
 
@@ -138,4 +139,57 @@ func Show(cwd, ref, relPath string) (string, bool) {
 		return "", false
 	}
 	return out, true
+}
+
+// MergeBase returns the merge-base sha of two refs (`git merge-base
+// <a> <b>`). False on git failure or unrelated histories.
+func MergeBase(cwd, a, b string) (string, bool) {
+	rc, out, _, _ := Run([]string{"merge-base", a, b}, cwd, 0)
+	if rc != 0 {
+		return "", false
+	}
+	s := strings.TrimSpace(out)
+	if s == "" {
+		return "", false
+	}
+	return s, true
+}
+
+// DefaultRemoteBranch resolves the remote's default branch via
+// `git symbolic-ref refs/remotes/<remote>/HEAD`, returning the
+// short branch name (e.g. "main"). False when no such symbolic-ref
+// is configured (common on minimally-configured fresh clones).
+func DefaultRemoteBranch(cwd, remote string) (string, bool) {
+	rc, out, _, _ := Run(
+		[]string{"symbolic-ref", "--short", "refs/remotes/" + remote + "/HEAD"},
+		cwd, 0,
+	)
+	if rc != 0 {
+		return "", false
+	}
+	s := strings.TrimSpace(out)
+	prefix := remote + "/"
+	if strings.HasPrefix(s, prefix) {
+		s = s[len(prefix):]
+	}
+	if s == "" {
+		return "", false
+	}
+	return s, true
+}
+
+// RefExists is `git rev-parse --verify --quiet <ref>` — a generic
+// check that works for any ref form (branch, remote-tracking, tag,
+// sha). BranchExists is the local-branch-only variant.
+func RefExists(cwd, ref string) bool {
+	rc, _, _, _ := Run([]string{"rev-parse", "--verify", "--quiet", ref}, cwd, 0)
+	return rc == 0
+}
+
+// Available reports whether the `git` binary is on PATH. Used by
+// callers that want to surface a structured "git not installed"
+// error instead of letting subprocess invocations fail opaquely.
+func Available() bool {
+	_, err := exec.LookPath(Bin)
+	return err == nil
 }
