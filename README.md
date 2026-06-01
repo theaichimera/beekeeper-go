@@ -91,6 +91,7 @@ only at the projects `bk` inspects.
 | `bk guard sync-branch` | Catch bead commits stranded off the sync branch (`--set BRANCH`) |
 | `bk guard daemon` | Catch duplicate daemons & silent remote-helper failures |
 | `bk guard pr-beads` | Catch backlog regressions when merging head into base (`--policy regression\|no-beads`) |
+| `bk guard stale-beads` | Catch open/in_progress beads whose work already shipped on the default branch |
 | `bk identity check` / `normalize` | Detect & fix actor-handle drift in bead JSONL |
 | `bk trunk-sync` | Reconcile bead JSONL drift between trunk and the sync branch (`--apply`) |
 | `bk lease claim` / `release` / `list` | Per-issue lease discipline via canonical identity |
@@ -242,6 +243,45 @@ keep bead writes on a dedicated sync branch.
 Set to `regression` or `no-beads` to enable; combine with `BEADKEEPER_BLOCK_ON_RED=1` to
 make a finding blocking instead of a warning. `BEADKEEPER_SKIP_HOOK=1` is the same
 escape hatch as for the doctor check.
+
+### `bk guard stale-beads` — git↔backlog reconciliation
+
+The post-merge sibling of `pr-beads`. Scans merged commit subjects on the default branch for
+bead-id tokens; reports open / in_progress beads whose work already shipped. Catches the
+"shipped but never closed" drift that accumulates when an agent forgets to run `bd close`.
+
+```bash
+bk guard stale-beads                                # current dir, default branch
+bk guard stale-beads --branch origin/main --json    # CI form
+bk guard stale-beads --prefix demo --lookback-days 30
+```
+
+**Match precision** (the make-or-break detail):
+
+- The bead id must appear in the commit **subject**, not the body.
+- The id must be flanked by characters NOT in the id alphabet (letters / digits / `_` / `.` / `-`).
+- The subject must be in **one of two shapes**:
+  - **Conventional-commit scope**: `feat(<id>): ...`, `<id>: ...`, `[<id>] ...`
+  - **PR-merge marker present**: subject ends with `(#N)` AND the id is token-bounded anywhere
+
+Tangential mentions like `chore: bump deps — see <id> for context` are deliberately NOT flagged.
+
+**JSON shape** (`--json`) — each finding includes a `bd_close_command` field shaped so an
+agent can drive closure deterministically:
+
+```json
+{
+  "id": "demo-xymh",
+  "status": "in_progress",
+  "landing_sha": "...",
+  "landing_subject": "feat(demo-xymh): ship parser (#736)",
+  "landing_pr": 736,
+  "bd_close_command": "bd close demo-xymh --reason \"shipped in #736\""
+}
+```
+
+Exit codes per bk's contract: `0` clean, `2` RED (one or more shipped-not-closed),
+`64` missing flag, `127` git missing.
 
 ### `bk guard daemon` — daemon hygiene
 

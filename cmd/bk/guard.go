@@ -10,6 +10,7 @@ import (
 	"github.com/theaichimera/beekeeper-go/internal/git"
 	"github.com/theaichimera/beekeeper-go/internal/guard"
 	"github.com/theaichimera/beekeeper-go/internal/prbeads"
+	"github.com/theaichimera/beekeeper-go/internal/staleship"
 	"github.com/theaichimera/beekeeper-go/internal/syncbranch"
 )
 
@@ -22,7 +23,173 @@ func newGuardCmd() *cobra.Command {
 	c.AddCommand(newGuardSyncBranchCmd())
 	c.AddCommand(newGuardDaemonCmd())
 	c.AddCommand(newGuardPRBeadsCmd())
+	c.AddCommand(newGuardStaleBeadsCmd())
 	return c
+}
+
+// `bk guard stale-beads` — git<->backlog reconciliation.
+func newGuardStaleBeadsCmd() *cobra.Command {
+	var (
+		repo     string
+		branch   string
+		prefix   string
+		lookback int
+		jsonOut  bool
+	)
+	c := &cobra.Command{
+		Use:   "stale-beads [path]",
+		Short: "Detect open / in_progress beads whose work already shipped on the default branch.",
+		Long: `Scans merged commit subjects on a branch (default: remote default branch)
+for bead-id tokens, and reports open / in_progress beads whose id
+appears in a shipped subject. The post-merge sibling of guard pr-beads.
+
+Match precision (the make-or-break detail):
+  - The bead id must appear in the commit SUBJECT, not the body.
+  - The id must be delimited (id-alphabet boundary).
+  - Either the subject is in conventional-commit scope form
+    (feat(<id>): ..., <id>: ..., [<id>] ...), OR the subject ends
+    with a (#N) PR-merge marker and the id is token-bounded.
+  - Tangential mentions like "see <id> for context" are NOT matched.
+
+Exit codes (per bk contract):
+  0  no shipped-not-closed beads
+  2  one or more shipped-not-closed beads (RED)
+  64 missing / invalid flag
+  127 git not on PATH`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if !git.Available() {
+				_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "error: `git` not found on PATH.")
+				silentExit(127)
+				return nil
+			}
+			if len(args) > 0 {
+				repo = args[0]
+			}
+			if repo == "" {
+				repo = "."
+			}
+			if prefix == "" {
+				if got, ok := staleship.DerivePrefix(repo); ok {
+					prefix = got
+				} else {
+					_, _ = fmt.Fprintln(cmd.ErrOrStderr(),
+						"error: cannot derive bead prefix; pass --prefix explicitly.")
+					silentExit(64)
+					return nil
+				}
+			}
+			if branch == "" {
+				if got, ok := resolveDefaultBranch(repo); ok {
+					branch = got
+				} else {
+					_, _ = fmt.Fprintln(cmd.ErrOrStderr(),
+						"error: cannot resolve default branch; pass --branch.")
+					silentExit(64)
+					return nil
+				}
+			}
+
+			r, err := staleship.Diagnose(repo, branch, prefix, lookback)
+			if err != nil {
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "error: %s\n", err)
+				silentExit(1)
+				return nil
+			}
+
+			out := cmd.OutOrStdout()
+			if jsonOut {
+				payload := map[string]any{
+					"branch":   r.Branch,
+					"prefix":   r.Prefix,
+					"lookback": r.Lookback,
+					"worst":    string(r.Worst()),
+					"findings": staleshipFindingsToJSON(r.Findings),
+				}
+				b, _ := json.MarshalIndent(payload, "", "  ")
+				_, _ = out.Write(b)
+				_, _ = out.Write([]byte("\n"))
+			} else if len(r.Findings) == 0 {
+				_, _ = fmt.Fprintf(out,
+					"OK — no shipped-not-closed beads on `%s` (prefix=%s, lookback=%dd).\n",
+					r.Branch, r.Prefix, r.Lookback)
+			} else {
+				_, _ = fmt.Fprintf(out, "Branch: %s\nPrefix: %s\nLookback: %dd\n\n",
+					r.Branch, r.Prefix, r.Lookback)
+				for _, f := range r.Findings {
+					prTag := "(no #N)"
+					if f.LandingPR > 0 {
+						prTag = fmt.Sprintf("(#%d)", f.LandingPR)
+					}
+					_, _ = fmt.Fprintf(out, "[RED] %s  status=%s  %s  %s\n",
+						f.BeadID, f.Status, prTag, f.LandingSHA[:7])
+					_, _ = fmt.Fprintf(out, "        subject: %s\n", f.LandingSubject)
+				}
+				_, _ = fmt.Fprintf(out, "\n%d shipped-not-closed bead(s).\n",
+					len(r.Findings))
+			}
+
+			if r.Worst() == staleship.RED {
+				silentExit(2)
+			}
+			return nil
+		},
+	}
+	c.Flags().StringVar(&repo, "repo", "", "repo path (default: current dir or first positional arg)")
+	c.Flags().StringVar(&branch, "branch", "", "branch to scan (default: remote default branch)")
+	c.Flags().StringVar(&prefix, "prefix", "", "bead-id prefix (default: derived from JSONL)")
+	c.Flags().IntVar(&lookback, "lookback-days", 90, "limit git log to last N days (0 = no filter)")
+	c.Flags().BoolVar(&jsonOut, "json", false, "emit JSON")
+	return c
+}
+
+func staleshipFindingsToJSON(fs []staleship.Finding) []map[string]any {
+	out := make([]map[string]any, 0, len(fs))
+	for _, f := range fs {
+		out = append(out, map[string]any{
+			"id":              f.BeadID,
+			"status":          f.Status,
+			"landing_sha":     f.LandingSHA,
+			"landing_subject": f.LandingSubject,
+			"landing_pr":      f.LandingPR,
+			// `bd_close_command` is shaped so an agent can drive
+			// closure deterministically (per acceptance criteria).
+			"bd_close_command": bdCloseCommand(f),
+		})
+	}
+	return out
+}
+
+// bdCloseCommand renders the canonical close-incantation for a
+// shipped-not-closed bead. Agents reading the JSON can execute this
+// verbatim. The `--reason` quoting is shell-safe (no embedded quotes
+// in the canonical form).
+func bdCloseCommand(f staleship.Finding) string {
+	if f.LandingPR > 0 {
+		return fmt.Sprintf(`bd close %s --reason "shipped in #%d"`, f.BeadID, f.LandingPR)
+	}
+	return fmt.Sprintf(`bd close %s --reason "shipped in %s"`, f.BeadID, f.LandingSHA[:7])
+}
+
+// resolveDefaultBranch picks the remote default branch with the
+// short alias, or falls back to a local `main` / `master`.
+func resolveDefaultBranch(repo string) (string, bool) {
+	if def, ok := git.DefaultRemoteBranch(repo, "origin"); ok {
+		// Prefer the remote-tracking ref so locally-stale clones
+		// reflect upstream merges.
+		if git.RefExists(repo, "origin/"+def) {
+			return "origin/" + def, true
+		}
+		if git.RefExists(repo, def) {
+			return def, true
+		}
+	}
+	for _, candidate := range []string{"origin/main", "main", "origin/master", "master"} {
+		if git.RefExists(repo, candidate) {
+			return candidate, true
+		}
+	}
+	return "", false
 }
 
 // `bk guard pr-beads` — content-aware backlog-regression gate.
