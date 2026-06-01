@@ -13,11 +13,11 @@ import (
 	bkproject "github.com/theaichimera/beekeeper-go/internal/project"
 )
 
-// bkproject_BdRunner / setBdRunner: thin shims around the global
+// bkprojectBdRunner / setBdRunner: thin shims around the global
 // BdRunner in internal/project so tests in cmd/bk can swap it in/out
 // without importing internal/project at every call site.
-func bkproject_BdRunner() execwrap.Runner { return bkproject.BdRunner }
-func setBdRunner(r execwrap.Runner)       { bkproject.BdRunner = r }
+func bkprojectBdRunner() execwrap.Runner { return bkproject.BdRunner }
+func setBdRunner(r execwrap.Runner)      { bkproject.BdRunner = r }
 
 func gitInRepo(t *testing.T, dir string, args ...string) {
 	t.Helper()
@@ -221,7 +221,7 @@ func TestCLIGuardStaleBeadsCloseDryRunNoMutation(t *testing.T) {
 	// bd-list to be empty (so detection only uses JSONL fallback);
 	// stub bd-close to fail loudly if invoked.
 	closeCalls := 0
-	orig := bkproject_BdRunner()
+	orig := bkprojectBdRunner()
 	setBdRunner(func(args []string, cwd string, timeout time.Duration) (int, string, string, error) {
 		if len(args) >= 2 && args[0] == "bd" && args[1] == "close" {
 			closeCalls++
@@ -268,7 +268,7 @@ func TestCLIGuardStaleBeadsCloseDryRunNoMutation(t *testing.T) {
 
 func TestCLIGuardStaleBeadsCloseApplyClosesAndSummarizes(t *testing.T) {
 	closeCalls := 0
-	orig := bkproject_BdRunner()
+	orig := bkprojectBdRunner()
 	setBdRunner(func(args []string, cwd string, timeout time.Duration) (int, string, string, error) {
 		if len(args) >= 2 && args[0] == "bd" && args[1] == "close" {
 			closeCalls++
@@ -310,7 +310,7 @@ func TestCLIGuardStaleBeadsCloseApplyClosesAndSummarizes(t *testing.T) {
 
 func TestCLIGuardStaleBeadsCloseExcludeFlag(t *testing.T) {
 	closeCalls := 0
-	orig := bkproject_BdRunner()
+	orig := bkprojectBdRunner()
 	setBdRunner(func(args []string, cwd string, timeout time.Duration) (int, string, string, error) {
 		if len(args) >= 2 && args[0] == "bd" && args[1] == "close" {
 			closeCalls++
@@ -350,7 +350,7 @@ func TestCLIGuardStaleBeadsCloseExcludeFlag(t *testing.T) {
 
 func TestCLIGuardStaleBeadsCloseSkipsBlockedWithoutForce(t *testing.T) {
 	closeCalls := 0
-	orig := bkproject_BdRunner()
+	orig := bkprojectBdRunner()
 	setBdRunner(func(args []string, cwd string, timeout time.Duration) (int, string, string, error) {
 		if len(args) >= 2 && args[0] == "bd" && args[1] == "close" {
 			closeCalls++
@@ -397,7 +397,7 @@ func TestCLIGuardStaleBeadsCloseSkipsBlockedWithoutForce(t *testing.T) {
 
 func TestCLIGuardStaleBeadsCloseForceClosesBlocked(t *testing.T) {
 	forceCalls := 0
-	orig := bkproject_BdRunner()
+	orig := bkprojectBdRunner()
 	setBdRunner(func(args []string, cwd string, timeout time.Duration) (int, string, string, error) {
 		if len(args) >= 2 && args[0] == "bd" && args[1] == "close" {
 			forceFlag := false
