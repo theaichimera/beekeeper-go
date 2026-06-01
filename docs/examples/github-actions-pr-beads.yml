@@ -11,9 +11,11 @@
 #     to `no-beads` if your repo confines bead writes to a sync branch
 #     and you want ANY `.beads/issues.jsonl` modification on a PR to
 #     fail the check.
-#   - This job pulls the latest released `bk` binary directly. Pin to a
-#     specific tag (e.g. `v0.1.0`) for production use:
-#     `download/v0.1.0/beekeeper-go_v0.1.0_linux_x86_64.tar.gz`.
+#   - This job resolves the latest released `bk` tag via the GitHub API
+#     (release asset names are version-stamped, e.g.
+#     `beekeeper-go_0.1.1_linux_x86_64.tar.gz`). For production, pin a
+#     specific version instead, e.g.:
+#     `download/v0.1.1/beekeeper-go_0.1.1_linux_x86_64.tar.gz`.
 
 name: pr-beads
 on:
@@ -29,8 +31,9 @@ jobs:
 
       - name: Install bk
         run: |
+          VER=$(curl -s https://api.github.com/repos/theaichimera/beekeeper-go/releases/latest | jq -r .tag_name)
           curl -sL \
-            https://github.com/theaichimera/beekeeper-go/releases/latest/download/beekeeper-go_linux_x86_64.tar.gz \
+            "https://github.com/theaichimera/beekeeper-go/releases/download/${VER}/beekeeper-go_${VER#v}_linux_x86_64.tar.gz" \
             | tar -xz
           sudo install -m 0755 bk /usr/local/bin/bk
           bk version
