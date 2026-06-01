@@ -7,7 +7,17 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	execwrap "github.com/theaichimera/beekeeper-go/internal/exec"
+	bkproject "github.com/theaichimera/beekeeper-go/internal/project"
 )
+
+// bkprojectBdRunner / setBdRunner: thin shims around the global
+// BdRunner in internal/project so tests in cmd/bk can swap it in/out
+// without importing internal/project at every call site.
+func bkprojectBdRunner() execwrap.Runner { return bkproject.BdRunner }
+func setBdRunner(r execwrap.Runner)      { bkproject.BdRunner = r }
 
 func gitInRepo(t *testing.T, dir string, args ...string) {
 	t.Helper()
@@ -203,6 +213,228 @@ func TestCLIGuardStaleBeadsShipTypesFlag(t *testing.T) {
 	}
 	if fs[0].(map[string]any)["id"] != "demo-docs" {
 		t.Fatalf("wrong id under docs override: %v", fs[0])
+	}
+}
+
+func TestCLIGuardStaleBeadsCloseDryRunNoMutation(t *testing.T) {
+	// --close without --apply must NOT call `bd close`. Stub
+	// bd-list to be empty (so detection only uses JSONL fallback);
+	// stub bd-close to fail loudly if invoked.
+	closeCalls := 0
+	orig := bkprojectBdRunner()
+	setBdRunner(func(args []string, cwd string, timeout time.Duration) (int, string, string, error) {
+		if len(args) >= 2 && args[0] == "bd" && args[1] == "close" {
+			closeCalls++
+			return 1, "", "(should not run in dry-run)", nil
+		}
+		if len(args) >= 2 && args[0] == "bd" && args[1] == "list" {
+			return 0, `[]`, "", nil
+		}
+		return 0, "", "", nil
+	})
+	t.Cleanup(func() { setBdRunner(orig) })
+
+	dir := initStaleBeadsRepo(t,
+		[]map[string]any{{"id": "demo-x", "status": "in_progress"}},
+		[]string{"feat(demo-x): land it (#42)"},
+	)
+	out, _, rc := runCmd(t, "guard", "stale-beads",
+		"--repo", dir, "--branch", "main", "--close", "--json")
+	if rc != 2 {
+		t.Fatalf("rc=%d want 2 (RED finding present)", rc)
+	}
+	if closeCalls != 0 {
+		t.Fatalf("dry-run called bd close %d times", closeCalls)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatalf("bad json: %v\n%s", err, out)
+	}
+	close := doc["close"].(map[string]any)
+	if close["dry_run"] != true {
+		t.Fatalf("dry_run=%v want true", close["dry_run"])
+	}
+	if close["applied"] != false {
+		t.Fatalf("applied=%v want false", close["applied"])
+	}
+	counts := close["counts"].(map[string]any)
+	// Even though no close ran, the plan should show 0 closed (since
+	// nothing was applied) and 0 skipped — the action is in the plan
+	// but unexecuted.
+	if int(counts["closed"].(float64)) != 0 {
+		t.Fatalf("dry-run reported closed > 0: %v", counts)
+	}
+}
+
+func TestCLIGuardStaleBeadsCloseApplyClosesAndSummarizes(t *testing.T) {
+	closeCalls := 0
+	orig := bkprojectBdRunner()
+	setBdRunner(func(args []string, cwd string, timeout time.Duration) (int, string, string, error) {
+		if len(args) >= 2 && args[0] == "bd" && args[1] == "close" {
+			closeCalls++
+			return 0, "Closed.\n", "", nil
+		}
+		if len(args) >= 2 && args[0] == "bd" && args[1] == "list" {
+			return 0, `[]`, "", nil
+		}
+		return 0, "", "", nil
+	})
+	t.Cleanup(func() { setBdRunner(orig) })
+
+	dir := initStaleBeadsRepo(t,
+		[]map[string]any{
+			{"id": "demo-a", "status": "in_progress"},
+			{"id": "demo-b", "status": "in_progress"},
+		},
+		[]string{
+			"feat(demo-a): land a (#1)",
+			"feat(demo-b): land b (#2)",
+		},
+	)
+	out, _, rc := runCmd(t, "guard", "stale-beads",
+		"--repo", dir, "--branch", "main", "--close", "--apply", "--json")
+	if rc != 2 {
+		t.Fatalf("rc=%d want 2", rc)
+	}
+	if closeCalls != 2 {
+		t.Fatalf("close calls=%d want 2", closeCalls)
+	}
+	var doc map[string]any
+	_ = json.Unmarshal([]byte(out), &doc)
+	close := doc["close"].(map[string]any)
+	counts := close["counts"].(map[string]any)
+	if int(counts["closed"].(float64)) != 2 {
+		t.Fatalf("closed=%v want 2", counts["closed"])
+	}
+}
+
+func TestCLIGuardStaleBeadsCloseExcludeFlag(t *testing.T) {
+	closeCalls := 0
+	orig := bkprojectBdRunner()
+	setBdRunner(func(args []string, cwd string, timeout time.Duration) (int, string, string, error) {
+		if len(args) >= 2 && args[0] == "bd" && args[1] == "close" {
+			closeCalls++
+			return 0, "Closed.\n", "", nil
+		}
+		if len(args) >= 2 && args[0] == "bd" && args[1] == "list" {
+			return 0, `[]`, "", nil
+		}
+		return 0, "", "", nil
+	})
+	t.Cleanup(func() { setBdRunner(orig) })
+
+	dir := initStaleBeadsRepo(t,
+		[]map[string]any{
+			{"id": "demo-keep", "status": "in_progress"},
+			{"id": "demo-drop", "status": "in_progress"},
+		},
+		[]string{
+			"feat(demo-keep): land keep (#1)",
+			"feat(demo-drop): land drop (#2)",
+		},
+	)
+	out, _, _ := runCmd(t, "guard", "stale-beads",
+		"--repo", dir, "--branch", "main", "--close", "--apply",
+		"--exclude", "demo-keep", "--json")
+	if closeCalls != 1 {
+		t.Fatalf("close calls=%d want 1 (only demo-drop)", closeCalls)
+	}
+	var doc map[string]any
+	_ = json.Unmarshal([]byte(out), &doc)
+	close := doc["close"].(map[string]any)
+	excluded := close["skipped_excluded"].([]any)
+	if len(excluded) != 1 || excluded[0] != "demo-keep" {
+		t.Fatalf("skipped_excluded=%v want [demo-keep]", excluded)
+	}
+}
+
+func TestCLIGuardStaleBeadsCloseSkipsBlockedWithoutForce(t *testing.T) {
+	closeCalls := 0
+	orig := bkprojectBdRunner()
+	setBdRunner(func(args []string, cwd string, timeout time.Duration) (int, string, string, error) {
+		if len(args) >= 2 && args[0] == "bd" && args[1] == "close" {
+			closeCalls++
+			// Defense-in-depth: even if PlanCloses misses the blocker,
+			// bd's own refusal must be parsed.
+			return 1, "", "blocked by open issues [demo-7ftc] (use --force)\n", nil
+		}
+		if len(args) >= 2 && args[0] == "bd" && args[1] == "list" {
+			return 0, `[
+				{"id":"demo-9wup","status":"in_progress","dependencies":[
+					{"type":"blocks","depends_on_id":"demo-7ftc"}
+				]},
+				{"id":"demo-7ftc","status":"open"}
+			]`, "", nil
+		}
+		return 0, "", "", nil
+	})
+	t.Cleanup(func() { setBdRunner(orig) })
+
+	dir := initStaleBeadsRepo(t,
+		[]map[string]any{
+			{"id": "demo-9wup", "status": "in_progress"},
+			{"id": "demo-7ftc", "status": "open"}, // the blocker
+		},
+		[]string{"feat(demo-9wup): land (#100)"},
+	)
+	out, _, _ := runCmd(t, "guard", "stale-beads",
+		"--repo", dir, "--branch", "main", "--close", "--apply", "--json")
+	if closeCalls != 0 {
+		t.Fatalf("close calls=%d (planner should pre-skip blocked)", closeCalls)
+	}
+	var doc map[string]any
+	_ = json.Unmarshal([]byte(out), &doc)
+	close := doc["close"].(map[string]any)
+	blocked := close["skipped_blocked"].([]any)
+	if len(blocked) != 1 {
+		t.Fatalf("skipped_blocked=%v want 1", blocked)
+	}
+	row := blocked[0].(map[string]any)
+	if row["id"] != "demo-9wup" || row["blocker"] != "demo-7ftc" {
+		t.Fatalf("blocked row: %v", row)
+	}
+}
+
+func TestCLIGuardStaleBeadsCloseForceClosesBlocked(t *testing.T) {
+	forceCalls := 0
+	orig := bkprojectBdRunner()
+	setBdRunner(func(args []string, cwd string, timeout time.Duration) (int, string, string, error) {
+		if len(args) >= 2 && args[0] == "bd" && args[1] == "close" {
+			forceFlag := false
+			for _, a := range args {
+				if a == "--force" {
+					forceFlag = true
+				}
+			}
+			if !forceFlag {
+				return 1, "", "blocked by open issues [demo-7ftc] (use --force)\n", nil
+			}
+			forceCalls++
+			return 0, "Closed (force).\n", "", nil
+		}
+		if len(args) >= 2 && args[0] == "bd" && args[1] == "list" {
+			return 0, `[
+				{"id":"demo-9wup","status":"in_progress","dependencies":[
+					{"type":"blocks","depends_on_id":"demo-7ftc"}
+				]},
+				{"id":"demo-7ftc","status":"open"}
+			]`, "", nil
+		}
+		return 0, "", "", nil
+	})
+	t.Cleanup(func() { setBdRunner(orig) })
+
+	dir := initStaleBeadsRepo(t,
+		[]map[string]any{
+			{"id": "demo-9wup", "status": "in_progress"},
+			{"id": "demo-7ftc", "status": "open"},
+		},
+		[]string{"feat(demo-9wup): land (#100)"},
+	)
+	_, _, _ = runCmd(t, "guard", "stale-beads",
+		"--repo", dir, "--branch", "main", "--close", "--apply", "--force", "--json")
+	if forceCalls != 1 {
+		t.Fatalf("force-close calls=%d want 1", forceCalls)
 	}
 }
 
