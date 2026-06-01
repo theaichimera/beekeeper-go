@@ -58,6 +58,20 @@ type ProjectBoard struct {
 	Blocked     []Issue
 	ClosedCount int
 	OtherCount  int
+
+	// ByStatus is the raw `status` field count across ALL records in
+	// this project, including closed. Distinct from the Ready/InProgress/
+	// Blocked buckets — those apply blocking-deps evaluation, this is
+	// the unmodified field. Keys: "open", "in_progress", "blocked",
+	// "closed", "other".
+	ByStatus map[string]int
+
+	// ActiveByPriority counts NON-CLOSED beads by integer priority.
+	// Records without a numeric priority go under key -1.
+	ActiveByPriority map[int]int
+
+	// Total is the count of all parseable records.
+	Total int
 }
 
 // LeaseGaps returns the subset of InProgress flagged as gaps.
@@ -98,6 +112,42 @@ func (r Report) Totals() map[string]int {
 	return t
 }
 
+// Summary is the cross-project rollup used by `bk board --summary`
+// and `--json`. Keys are stable for downstream JSON consumers.
+type Summary struct {
+	Total            int            `json:"total"`
+	ByStatus         map[string]int `json:"by_status"`
+	ActiveByPriority map[int]int    `json:"active_by_priority"`
+	PercentComplete  float64        `json:"percent_complete"`
+	InProgress       int            `json:"in_progress_count"`
+	LeaseGaps        int            `json:"lease_gaps_count"`
+	StaleWIP         int            `json:"stale_wip_count"` // populated by callers (see internal/stalewip).
+}
+
+// Aggregate folds per-project counts into a single Summary. Projects
+// without a parsable .beads/issues.jsonl contribute zeros.
+func (r Report) Aggregate() Summary {
+	s := Summary{
+		ByStatus:         map[string]int{},
+		ActiveByPriority: map[int]int{},
+	}
+	for _, p := range r.Projects {
+		s.Total += p.Total
+		for k, v := range p.ByStatus {
+			s.ByStatus[k] += v
+		}
+		for k, v := range p.ActiveByPriority {
+			s.ActiveByPriority[k] += v
+		}
+		s.InProgress += len(p.InProgress)
+		s.LeaseGaps += len(p.LeaseGaps())
+	}
+	if s.Total > 0 {
+		s.PercentComplete = float64(s.ByStatus["closed"]) / float64(s.Total) * 100.0
+	}
+	return s
+}
+
 // LeaseGaps returns every lease-gap issue across all projects.
 func (r Report) LeaseGaps() []Issue {
 	var out []Issue
@@ -126,7 +176,11 @@ func Scan(paths []string, maxDepth int) Report {
 // --- per-project classification -----------------------------------------
 
 func classifyProject(p bkproject.Project) ProjectBoard {
-	pb := ProjectBoard{ProjectRoot: p.Root}
+	pb := ProjectBoard{
+		ProjectRoot:      p.Root,
+		ByStatus:         map[string]int{},
+		ActiveByPriority: map[int]int{},
+	}
 
 	records := readRecords(p.IssuesJSONL())
 	statusByID := buildStatusIndex(records)
@@ -136,6 +190,20 @@ func classifyProject(p bkproject.Project) ProjectBoard {
 		st := stringField(rec, "status")
 		if id == "" {
 			continue
+		}
+		pb.Total++
+		switch st {
+		case "open", "in_progress", "blocked", "closed":
+			pb.ByStatus[st]++
+		default:
+			pb.ByStatus["other"]++
+		}
+		if st != "closed" {
+			pri := -1
+			if p := intField(rec, "priority"); p != nil {
+				pri = *p
+			}
+			pb.ActiveByPriority[pri]++
 		}
 		if rec["status"] == nil {
 			pb.OtherCount++
