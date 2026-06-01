@@ -8,10 +8,11 @@ import (
 
 func newDoctorCmd() *cobra.Command {
 	var (
-		jsonOut  bool
-		noColor  bool
-		strict   bool
-		maxDepth int
+		jsonOut   bool
+		noColor   bool
+		strict    bool
+		maxDepth  int
+		staleDays int
 	)
 	c := &cobra.Command{
 		Use:   "doctor [path...]",
@@ -25,7 +26,10 @@ Exit codes (mirrors the Python tool):
   otherwise          -> 0`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			paths := defaultPaths(args)
-			r := doctor.Run(paths, maxDepth)
+			r := doctor.RunWithOpts(paths, doctor.Opts{
+				MaxDepth:  maxDepth,
+				StaleDays: staleDays,
+			})
 			out := cmd.OutOrStdout()
 			if jsonOut {
 				_, _ = out.Write([]byte(doctor.RenderJSON(r)))
@@ -48,5 +52,7 @@ Exit codes (mirrors the Python tool):
 	c.Flags().BoolVar(&noColor, "no-color", false, "disable ANSI color")
 	c.Flags().BoolVar(&strict, "strict", false, "exit nonzero on YELLOW as well as RED")
 	c.Flags().IntVar(&maxDepth, "max-depth", 4, "walk depth under each root looking for .beads/ dirs")
+	c.Flags().IntVar(&staleDays, "stale-days", 0,
+		"stale-WIP threshold (in_progress beads untouched > N days); 0 = default 7d, negative = disable")
 	return c
 }
