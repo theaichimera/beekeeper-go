@@ -366,7 +366,18 @@ func TestParityBoardJSON(t *testing.T) {
 	pyOut := runBin(py, []string{"board", repo, "--json"})
 	goOut := runBin(gobk, []string{"board", repo, "--json"})
 	requireSameRC(t, "board --json", pyOut, goOut)
-	requireJSONDeepEqual(t, "board --json", pyOut.stdout, goOut.stdout, repo)
+	// Go adds an aggregate `summary` block + per-project status /
+	// priority breakdown keys (bkg-bqa.1) that the Python tool does
+	// not emit. These are documented as Go-only forward divergences
+	// in docs/PARITY.md §4 — drop them before comparing the rest of
+	// the payload.
+	ignore := map[string]struct{}{
+		"summary":            {},
+		"by_status":          {},
+		"active_by_priority": {},
+		"total":              {},
+	}
+	requireJSONDeepEqualIgnoring(t, "board --json", pyOut.stdout, goOut.stdout, repo, ignore)
 }
 
 func TestParityGuardDBClean(t *testing.T) {
