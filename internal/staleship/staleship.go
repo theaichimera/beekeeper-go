@@ -1,0 +1,333 @@
+// Package staleship is the post-merge sibling of `bk guard pr-beads`.
+// It catches the inverse failure mode: a bead's work has LANDED on the
+// default branch (its id appears in a merged commit/PR subject) but the
+// bead is still open or in_progress in `.beads/issues.jsonl`.
+//
+// Motivating evidence: a real review of a 627-bead backlog found ~18
+// of 33 in_progress beads in this state — work that shipped, beads
+// that were never moved to closed. Detecting this with raw tools means
+// running `git log <branch> --grep=<prefix>-<id>` once per bead by
+// hand. `bk guard stale-beads` is the deterministic version.
+//
+// Match precision (the make-or-break detail per the spec):
+//
+//   - The bead id MUST appear in the commit SUBJECT line, not just
+//     anywhere in the body. Tangential references in commit bodies
+//     ("see prefix-afby for context") are NOT shipped.
+//   - The bead id MUST be flanked by characters that are NOT part of
+//     the id alphabet (letters / digits / `_` / `.` / `-`). Common
+//     forms: `(prefix-id)`, `prefix-id:`, `[prefix-id]`, leading or
+//     trailing whitespace, end-of-line.
+//   - The bead id is the FULL string (e.g. `prefix-1k8x.1`), so
+//     `prefix-1k8x` does NOT match `prefix-1k8x.1` and vice versa.
+//
+// Severity: shipped-not-closed beads are RED (the bead is lying about
+// reality and a CI gate should fail). YELLOW + advisory variants
+// (closed-no-landing) are deferred.
+//
+// Read-only. No JSONL mutation, no `bd` shell-out, no daemon touch.
+// Closing a bead remains a human/agent decision; this package returns
+// a `--json` shape that lets a downstream agent drive
+// `bd close <id> --reason "shipped in #<PR>"` deterministically.
+package staleship
+
+import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/theaichimera/beekeeper-go/internal/git"
+)
+
+// JSONLRelPath duplicates the bead JSONL constant — this package is
+// import-isolated from `board` / `prbeads`.
+const JSONLRelPath = ".beads/issues.jsonl"
+
+// Severity stays binary in v1 — RED on shipped-not-closed, GREEN
+// otherwise. YELLOW reserved for the deferred closed-no-landing
+// advisory.
+type Severity string
+
+const (
+	GREEN Severity = "green"
+	RED   Severity = "red"
+)
+
+// Finding is one shipped-not-closed bead.
+type Finding struct {
+	BeadID         string
+	Status         string // "open" | "in_progress"
+	LandingSHA     string
+	LandingSubject string
+	LandingPR      int // 0 when no `(#N)` marker found
+}
+
+// Report is the full diagnose result.
+type Report struct {
+	Branch   string
+	Prefix   string
+	Lookback int // days; 0 == no filter
+	Findings []Finding
+}
+
+// Worst returns RED when any findings exist.
+func (r Report) Worst() Severity {
+	if len(r.Findings) == 0 {
+		return GREEN
+	}
+	return RED
+}
+
+// Diagnose scans `branch` for merged commits whose subject names an
+// open or in_progress bead from the JSONL at `repo`. `prefix` is the
+// bead-id namespace (auto-derived by callers via DerivePrefix).
+//
+// `lookbackDays` limits `git log` to commits newer than that cutoff;
+// 0 means no filter. The default of 90 days is set at the cmd layer.
+//
+// Returns ([], err) when git is unavailable or the JSONL is missing.
+func Diagnose(repo, branch, prefix string, lookbackDays int) (Report, error) {
+	r := Report{
+		Branch:   branch,
+		Prefix:   prefix,
+		Lookback: lookbackDays,
+	}
+	if !git.Available() {
+		return r, fmt.Errorf("git binary not on PATH")
+	}
+	if prefix == "" {
+		return r, fmt.Errorf("empty bead-id prefix")
+	}
+	if !git.RefExists(repo, branch) {
+		return r, fmt.Errorf("ref not found: %s", branch)
+	}
+
+	openIDs, err := readOpenIssueIDs(repo)
+	if err != nil {
+		return r, err
+	}
+	if len(openIDs) == 0 {
+		return r, nil
+	}
+
+	// One `git log` call gets every candidate commit. We post-filter
+	// to enforce subject-line + token-boundary precision.
+	args := []string{
+		"log",
+		"--no-merges",
+		// Pretty: SHA \x00 SUBJECT (single-line) — \x00 because subjects
+		// frequently contain '\t'/':'/etc.
+		`--pretty=%H%x00%s`,
+		"--grep=" + prefix,
+		branch,
+	}
+	if lookbackDays > 0 {
+		since := time.Now().AddDate(0, 0, -lookbackDays).Format("2006-01-02")
+		args = append(args, "--since="+since)
+	}
+	rc, stdout, _, _ := git.Run(args, repo, 30*time.Second)
+	if rc != 0 {
+		// Empty result is rc 0 with empty stdout. Non-zero is a real error.
+		return r, fmt.Errorf("git log failed (rc=%d) on %s", rc, branch)
+	}
+
+	// Per-id matchers used by subjectShipsBead.
+	tokens := make(map[string]*regexp.Regexp, len(openIDs))
+	scopes := make(map[string]*regexp.Regexp, len(openIDs))
+	for id := range openIDs {
+		tokens[id] = idMatcher(id)
+		scopes[id] = scopeMatcher(id)
+	}
+
+	prRe := regexp.MustCompile(`\(#(\d+)\)`)
+	seen := map[string]struct{}{}
+
+	for _, line := range strings.Split(stdout, "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\x00", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		sha, subject := parts[0], parts[1]
+		hasPR := prRe.MatchString(subject)
+		for id := range openIDs {
+			if _, already := seen[id]; already {
+				continue
+			}
+			if !subjectShipsBead(subject, hasPR, tokens[id], scopes[id]) {
+				continue
+			}
+			pr := 0
+			if m := prRe.FindStringSubmatch(subject); m != nil {
+				if n, err := parseIntStrict(m[1]); err == nil {
+					pr = n
+				}
+			}
+			r.Findings = append(r.Findings, Finding{
+				BeadID:         id,
+				Status:         openIDs[id],
+				LandingSHA:     sha,
+				LandingSubject: subject,
+				LandingPR:      pr,
+			})
+			seen[id] = struct{}{}
+		}
+	}
+
+	sort.Slice(r.Findings, func(i, j int) bool {
+		// Stable: by PR number (asc, missing last), then bead id.
+		a, b := r.Findings[i], r.Findings[j]
+		if (a.LandingPR == 0) != (b.LandingPR == 0) {
+			return a.LandingPR != 0
+		}
+		if a.LandingPR != b.LandingPR {
+			return a.LandingPR < b.LandingPR
+		}
+		return a.BeadID < b.BeadID
+	})
+	return r, nil
+}
+
+// idMatcher returns a regexp that matches `id` as a delimited token in
+// a commit subject. Token boundary: start-of-string, end-of-string, or
+// any character NOT in the id alphabet (letters / digits / `_` / `.` /
+// `-`). Compound ids like `prefix-1k8x.1` match literally because the
+// id is regexp-escaped.
+func idMatcher(id string) *regexp.Regexp {
+	return regexp.MustCompile(
+		`(^|[^A-Za-z0-9_.\-])` + regexp.QuoteMeta(id) + `([^A-Za-z0-9_.\-]|$)`,
+	)
+}
+
+// scopeMatcher returns a regexp that matches `id` only when it appears
+// in the conventional-commit SCOPE position at the start of the
+// subject — `^<type>(<id>):`, `^<id>:`, or `^[<id>]`. These positions
+// signal an authoritative landing for the bead, distinct from
+// tangential mentions.
+func scopeMatcher(id string) *regexp.Regexp {
+	q := regexp.QuoteMeta(id)
+	// (1) `feat(<id>): ...`            // conventional scope
+	// (2) `<id>: ...`                  // bare prefix
+	// (3) `[<id>] ...`                 // bracket prefix
+	return regexp.MustCompile(
+		`^(?:[A-Za-z]+\(` + q + `\):|` + q + `:|\[` + q + `\])`,
+	)
+}
+
+// subjectShipsBead returns true iff `subject` should be treated as
+// shipping the bead. Two acceptance modes:
+//
+//   - SCOPE mode:  the bead id is the conventional-commit scope OR
+//     bare prefix OR bracket prefix at the very start of the subject.
+//     This catches `feat(demo-x): ...`, `demo-x: ...`, `[demo-x] ...`.
+//
+//   - PR-MERGE mode: the subject ends with a `(#N)` PR-merge marker
+//     (the GitHub squash-merge convention) AND the id appears as a
+//     delimited token anywhere in the subject. This catches
+//     multi-id subjects like `feat: demo-0dh4 + demo-fz56 land
+//     together (#738)`.
+//
+// Subjects without either signature — e.g. `chore: bump deps (no
+// bead) — see demo-afby for context` — are TANGENTIAL and skipped.
+// The `see / later / context` pattern that drove false positives in
+// the motivating run does NOT trigger either mode by construction.
+func subjectShipsBead(subject string, hasPR bool, token, scope *regexp.Regexp) bool {
+	if scope.MatchString(subject) {
+		return true
+	}
+	if hasPR && token.MatchString(subject) {
+		return true
+	}
+	return false
+}
+
+// DerivePrefix infers the bead-id prefix from the JSONL: takes the
+// first record's id, splits at the rightmost `-`, returns the portion
+// before. e.g. `myapp-xymh.1` -> `myapp`. Returns ("", false)
+// when the JSONL is missing / empty / has no parseable id.
+func DerivePrefix(repo string) (string, bool) {
+	f, err := os.Open(filepath.Join(repo, JSONLRelPath))
+	if err != nil {
+		return "", false
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	buf := make([]byte, 0, 1024*1024)
+	sc.Buffer(buf, 16*1024*1024)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			continue
+		}
+		id, _ := rec["id"].(string)
+		if id == "" {
+			continue
+		}
+		// Bead ids look like `<prefix>-<rest>` where prefix can also
+		// contain `-`. We split at the FIRST `-` (matches the bd
+		// convention used in beads-go and the Python tool).
+		i := strings.IndexByte(id, '-')
+		if i <= 0 {
+			continue
+		}
+		return id[:i], true
+	}
+	return "", false
+}
+
+// readOpenIssueIDs returns id -> status for every record whose status
+// is "open" or "in_progress". Closed beads are intentionally absent —
+// the closed-no-landing variant is out of scope for v1.
+func readOpenIssueIDs(repo string) (map[string]string, error) {
+	f, err := os.Open(filepath.Join(repo, JSONLRelPath))
+	if err != nil {
+		return nil, fmt.Errorf("cannot read %s: %w", JSONLRelPath, err)
+	}
+	defer f.Close()
+	out := map[string]string{}
+	sc := bufio.NewScanner(f)
+	buf := make([]byte, 0, 1024*1024)
+	sc.Buffer(buf, 16*1024*1024)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			continue
+		}
+		id, _ := rec["id"].(string)
+		st, _ := rec["status"].(string)
+		if id == "" {
+			continue
+		}
+		if st == "open" || st == "in_progress" {
+			out[id] = st
+		}
+	}
+	return out, nil
+}
+
+func parseIntStrict(s string) (int, error) {
+	n := 0
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return 0, fmt.Errorf("non-digit")
+		}
+		n = n*10 + int(r-'0')
+	}
+	return n, nil
+}
