@@ -232,10 +232,6 @@ func printBoardRow(cmd *cobra.Command, i board.Issue) {
 	fmt.Fprintln(cmd.OutOrStdout(), line)
 }
 
-func boardJSONPayload(r board.Report) map[string]any {
-	return boardJSONPayloadWithStale(r, 0)
-}
-
 // boardJSONPayloadWithStale folds a caller-supplied stale-WIP count
 // into the aggregate `summary.stale_wip_count` field. Callers that
 // can't compute it (e.g. older tests) pass 0.
