@@ -17,6 +17,7 @@ func newBoardCmd() *cobra.Command {
 		statusOpt string
 		leaseGaps bool
 		strict    bool
+		summary   bool
 	)
 	c := &cobra.Command{
 		Use:   "board [path...]",
@@ -30,6 +31,13 @@ func newBoardCmd() *cobra.Command {
 				b, _ := json.MarshalIndent(payload, "", "  ")
 				_, _ = out.Write(b)
 				_, _ = out.Write([]byte("\n"))
+				if strict && r.Totals()["lease_gaps"] > 0 {
+					silentExit(1)
+				}
+				return nil
+			}
+			if summary {
+				printBoardSummary(cmd, r)
 				if strict && r.Totals()["lease_gaps"] > 0 {
 					silentExit(1)
 				}
@@ -102,7 +110,69 @@ func newBoardCmd() *cobra.Command {
 	c.Flags().StringVar(&statusOpt, "status", "all", "show only one bucket (ready|in_progress|blocked|all)")
 	c.Flags().BoolVar(&leaseGaps, "lease-gaps", false, "show only in_progress issues with no assignee")
 	c.Flags().BoolVar(&strict, "strict", false, "exit 1 when any lease gaps exist (CI)")
+	c.Flags().BoolVar(&summary, "summary", false, "print rollup only (totals, status / priority breakdowns); no per-bead dump")
 	return c
+}
+
+// printBoardSummary renders the human-readable rollup. Mirrors the
+// JSON aggregate's keys 1:1 so an operator reading the text can map
+// straight to fields in `--json`.
+func printBoardSummary(cmd *cobra.Command, r board.Report) {
+	out := cmd.OutOrStdout()
+	s := r.Aggregate()
+	if s.Total == 0 {
+		_, _ = fmt.Fprintln(out, "no projects with a .beads/ directory found, or no parseable records.")
+		return
+	}
+	_, _ = fmt.Fprintf(out, "TOTAL %d  closed=%d  in_progress=%d  open=%d  blocked=%d  other=%d  (%.1f%% complete)\n",
+		s.Total,
+		s.ByStatus["closed"],
+		s.ByStatus["in_progress"],
+		s.ByStatus["open"],
+		s.ByStatus["blocked"],
+		s.ByStatus["other"],
+		s.PercentComplete,
+	)
+	// Active-by-priority. Iterate sorted by integer key with -1 (no priority) last.
+	keys := make([]int, 0, len(s.ActiveByPriority))
+	for k := range s.ActiveByPriority {
+		keys = append(keys, k)
+	}
+	sortInts(keys)
+	var parts []string
+	for _, k := range keys {
+		if k < 0 {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("P%d:%d", k, s.ActiveByPriority[k]))
+	}
+	if n := s.ActiveByPriority[-1]; n > 0 {
+		parts = append(parts, fmt.Sprintf("P?:%d", n))
+	}
+	_, _ = fmt.Fprintf(out, "ACTIVE BY PRIORITY  %s\n", joinSpaces(parts))
+	_, _ = fmt.Fprintf(out, "WIP  in_progress=%d  lease_gaps=%d\n", s.InProgress, s.LeaseGaps)
+}
+
+func sortInts(xs []int) {
+	for i := 1; i < len(xs); i++ {
+		for j := i; j > 0 && xs[j-1] > xs[j]; j-- {
+			xs[j-1], xs[j] = xs[j], xs[j-1]
+		}
+	}
+}
+
+func joinSpaces(xs []string) string {
+	out := ""
+	for i, s := range xs {
+		if i > 0 {
+			out += "  "
+		}
+		out += s
+	}
+	if out == "" {
+		out = "(none)"
+	}
+	return out
 }
 
 func printBoardRow(cmd *cobra.Command, i board.Issue) {
@@ -138,19 +208,53 @@ func boardJSONPayload(r board.Report) map[string]any {
 	projs := make([]map[string]any, 0, len(r.Projects))
 	for _, pb := range r.Projects {
 		projs = append(projs, map[string]any{
-			"project_root": pb.ProjectRoot,
-			"ready":        boardIssuesToJSON(pb.Ready),
-			"in_progress":  boardIssuesToJSON(pb.InProgress),
-			"blocked":      boardIssuesToJSON(pb.Blocked),
-			"lease_gaps":   boardIssuesToJSON(pb.LeaseGaps()),
-			"closed_count": pb.ClosedCount,
-			"other_count":  pb.OtherCount,
+			"project_root":       pb.ProjectRoot,
+			"ready":              boardIssuesToJSON(pb.Ready),
+			"in_progress":        boardIssuesToJSON(pb.InProgress),
+			"blocked":            boardIssuesToJSON(pb.Blocked),
+			"lease_gaps":         boardIssuesToJSON(pb.LeaseGaps()),
+			"closed_count":       pb.ClosedCount,
+			"other_count":        pb.OtherCount,
+			"total":              pb.Total,
+			"by_status":          pb.ByStatus,
+			"active_by_priority": activePriorityToJSON(pb.ActiveByPriority),
 		})
 	}
+	s := r.Aggregate()
 	return map[string]any{
 		"projects": projs,
 		"totals":   r.Totals(),
+		"summary": map[string]any{
+			"total":              s.Total,
+			"by_status":          s.ByStatus,
+			"active_by_priority": activePriorityToJSON(s.ActiveByPriority),
+			"percent_complete":   roundPercent(s.PercentComplete),
+			"in_progress_count":  s.InProgress,
+			"lease_gaps_count":   s.LeaseGaps,
+			"stale_wip_count":    s.StaleWIP,
+		},
 	}
+}
+
+// activePriorityToJSON keys priorities as strings ("P0".."P4", "P?")
+// so the JSON object is deterministic and human-readable. The
+// internal map keys ints; -1 collapses to "P?".
+func activePriorityToJSON(m map[int]int) map[string]int {
+	out := map[string]int{}
+	for k, v := range m {
+		if k < 0 {
+			out["P?"] += v
+			continue
+		}
+		out[fmt.Sprintf("P%d", k)] += v
+	}
+	return out
+}
+
+// roundPercent trims to one decimal — keeps `--json` numerically
+// stable across runs without leaking floating-point drift to consumers.
+func roundPercent(p float64) float64 {
+	return float64(int(p*10+0.5)) / 10.0
 }
 
 func boardIssuesToJSON(xs []board.Issue) []map[string]any {
