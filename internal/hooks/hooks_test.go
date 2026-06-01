@@ -121,6 +121,31 @@ func TestRenderPromptIndicator(t *testing.T) {
 	}
 }
 
+func TestRenderPrePushIncludesPRBeadsPolicyPlumbing(t *testing.T) {
+	t.Parallel()
+	body := RenderPrePush(false)
+	for _, want := range []string{
+		"BEADKEEPER_PRBEADS_POLICY",
+		"guard pr-beads",
+		`PRBEADS_POLICY="${BEADKEEPER_PRBEADS_POLICY:-off}"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %q in pre-push template:\n%s", want, body)
+		}
+	}
+}
+
+func TestRenderPrePushDefaultsPRBeadsOff(t *testing.T) {
+	t.Parallel()
+	body := RenderPrePush(false)
+	// The OFF default is critical: an unconfigured installation must
+	// NOT start running pr-beads behind the user's back. The plumbing
+	// is only inert until the user opts in via env.
+	if !strings.Contains(body, `if [ "$PRBEADS_POLICY" != "off" ]; then`) {
+		t.Fatalf("default-off branch missing:\n%s", body)
+	}
+}
+
 func TestInstallOnNonGitDir(t *testing.T) {
 	t.Parallel()
 	bare := filepath.Join(t.TempDir(), "not-a-repo")
