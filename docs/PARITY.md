@@ -318,3 +318,42 @@ M4 left a gap — the harness omitted lease, merge-slot, and trunk-sync
 fixtures. M6 closed it with the 12 new fixtures listed in §1. The
 PARITY.md §1 contract now reflects the actual coverage rather than
 asserted coverage.
+
+## 8. Go-only divergence: `bk guard pr-beads` (bkg-lrc)
+
+`bk guard pr-beads` is **Go-only**. It has no counterpart in the
+Python `beadkeeper` tool, and we are NOT porting it back — this is a
+documented forward divergence rather than a parity gap.
+
+Rationale:
+
+  - The motivating incident is CI-shaped: the GitHub merge UI flagged
+    mergeability UNKNOWN on a PR carrying a stale JSONL snapshot. The
+    natural place to gate that is a CI step running a single static
+    binary, not a Python interpreter + venv.
+  - The Python tool's release surface is contracting (the M5 cutover
+    moved the public install path to `bk` via Homebrew). Adding new
+    functionality to the Python tool would widen a surface we want
+    narrower.
+  - `bk guard pr-beads`'s detection logic is content-aware (see the
+    package doc-comment in `internal/prbeads`). The Python
+    `syncbranch` module's subset check is id-only and explicitly
+    assumes "bead edits only ever originate on the sync branch."
+    Porting the new logic into Python would either duplicate the
+    `syncbranch` code path or introduce a second module — both worse
+    than living with one Go-only feature.
+
+The diff harness covers this divergence by **omission**: there are no
+pr-beads fixtures in the harness because there is no Python side to
+compare against. The `regressions()` table-driven tests in
+`internal/prbeads/prbeads_test.go` are the regression bar.
+
+If a future operator decides to bring the Python tool back to feature
+parity, the algorithm to port is documented in
+`internal/prbeads/prbeads.go`'s package doc-comment:
+status-rank table (`open=0, in_progress=1, blocked=1, closed=2`),
+assignee-equality check, RFC-3339 `updated_at` comparison, dropped-id
+check; combined under a `regression` policy, plus the strict
+`no-beads` policy (any `.beads/issues.jsonl` modification in
+`base..head` fails). Until then, the Go binary is the source of
+truth.
