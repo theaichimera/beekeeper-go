@@ -131,11 +131,55 @@ func TestResolveCallerUnmappedErrs(t *testing.T) {
 	}
 }
 
-func TestResolveCallerNoConfigErrs(t *testing.T) {
+// TestResolveCallerNoConfigDegrades — bkg-8nw. With identity OPT-IN
+// (no `.beadkeeper/identity.toml`), ResolveCaller must degrade to the
+// supplied raw handle instead of erroring. The downstream
+// `bd update --assignee <handle>` happily accepts a non-canonical
+// string when no config is present.
+func TestResolveCallerNoConfigDegrades(t *testing.T) {
 	t.Parallel()
 	repo := t.TempDir()
-	if _, err := ResolveCaller(repo, "alice"); err == nil {
-		t.Fatal("expected error")
+	got, err := ResolveCaller(repo, "alice")
+	if err != nil {
+		t.Fatalf("expected no error (opt-in identity); got %v", err)
+	}
+	if got != "alice" {
+		t.Fatalf("got=%q want %q (raw passthrough)", got, "alice")
+	}
+}
+
+// TestResolveCallerNoConfigUsesRawHandleWhenArgEmpty — when no
+// rawHandle is supplied, RawHandle()'s env-var chain must still feed
+// the degraded path. We force a known BD_ACTOR so the test is
+// hermetic vs the host's git config.
+func TestResolveCallerNoConfigUsesRawHandleWhenArgEmpty(t *testing.T) {
+	repo := t.TempDir()
+	t.Setenv("BD_ACTOR", "bob")
+	t.Setenv("GIT_AUTHOR_NAME", "")
+	got, err := ResolveCaller(repo, "")
+	if err != nil {
+		t.Fatalf("expected no error; got %v", err)
+	}
+	if got != "bob" {
+		t.Fatalf("got=%q want %q (BD_ACTOR fallback)", got, "bob")
+	}
+}
+
+// TestResolveCallerNoConfigEmptyHandleErrs — even with no identity
+// config, a totally-unresolvable handle (no env, no git user.email)
+// is still an error: we can't fabricate a canonical from nothing.
+func TestResolveCallerNoConfigEmptyHandleErrs(t *testing.T) {
+	repo := t.TempDir()
+	t.Setenv("BD_ACTOR", "")
+	t.Setenv("GIT_AUTHOR_NAME", "")
+	t.Setenv("USER", "")
+	t.Setenv("USERNAME", "")
+	// `git config user.email` may still resolve from the host's
+	// global config; if it does, this test is a no-op pass — the
+	// degraded path returned a non-empty handle, which is the spec.
+	got, err := ResolveCaller(repo, "")
+	if err == nil && got == "" {
+		t.Fatal("expected either a non-empty handle or an error")
 	}
 }
 

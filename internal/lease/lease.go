@@ -133,16 +133,25 @@ func RawHandle() string {
 }
 
 // ResolveCaller maps `rawHandle` (or the auto-detected default) to the
-// canonical handle declared in `.beadkeeper/identity.toml`. Returns
-// LeaseError if identity isn't configured or the handle is unknown.
+// canonical handle declared in `.beadkeeper/identity.toml`.
+//
+// Identity is OPT-IN per `cmd/bk/identity.go`: a workspace without
+// `.beadkeeper/identity.toml` SHOULD still be able to use lease
+// commands. Behavior:
+//
+//   - cfg == nil (no identity.toml): degrade to the raw handle from
+//     BD_ACTOR / GIT_AUTHOR_NAME / `git config user.email` (RawHandle).
+//     The raw handle becomes the canonical for this call. The downstream
+//     `bd update --assignee <handle>` happily accepts it.
+//   - cfg != nil and handle is canonical / aliased: return the canonical.
+//   - cfg != nil and handle is UNKNOWN: error "unknown alias" (preserves
+//     the strict-mode behavior the bkg-bqa.* identity tests rely on).
+//   - No raw handle resolvable at all: error regardless of cfg.
+//
+// Fixes bkg-8nw: previously hard-failed on missing identity.toml,
+// contradicting the opt-in framing.
 func ResolveCaller(repo string, rawHandle string) (string, error) {
 	cfg, _ := config.LoadIdentityConfig(repo)
-	if cfg == nil {
-		return "", &LeaseError{Msg: fmt.Sprintf(
-			"identity not configured at %s/.beadkeeper/identity.toml. "+
-				"Leasing requires a canonical-handle map.", repo,
-		)}
-	}
 	raw := rawHandle
 	if raw == "" {
 		raw = RawHandle()
@@ -150,6 +159,10 @@ func ResolveCaller(repo string, rawHandle string) (string, error) {
 	if raw == "" {
 		return "", &LeaseError{Msg: "could not determine the caller's handle " +
 			"(BD_ACTOR, GIT_AUTHOR_NAME, or `git config user.email` are all unset)."}
+	}
+	if cfg == nil {
+		// Opt-in: no identity config -> raw handle is canonical.
+		return raw, nil
 	}
 	if mapped := cfg.Map(raw); mapped != "" {
 		return mapped, nil
