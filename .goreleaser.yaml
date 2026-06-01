@@ -1,7 +1,8 @@
 # Beekeeper Go release config.
 #
-# Produces a single static binary (`bk`) for darwin/linux on amd64/arm64,
-# wires version/commit/date via ldflags, and publishes a GitHub release.
+# Produces a single static binary (`bk`) for darwin/linux/windows on
+# amd64/arm64, wires version/commit/date via ldflags, and publishes a
+# GitHub release.
 # Homebrew tap publishing is included but commented until a tap repo
 # exists — uncomment once theaichimera/homebrew-tap is provisioned.
 
@@ -22,6 +23,7 @@ builds:
     goos:
       - darwin
       - linux
+      - windows
     goarch:
       - amd64
       - arm64
@@ -42,6 +44,10 @@ archives:
       {{- if eq .Arch "amd64" }}x86_64
       {{- else if eq .Arch "386" }}i386
       {{- else }}{{ .Arch }}{{ end }}
+    # Windows users expect .zip; everything else gets .tar.gz.
+    format_overrides:
+      - goos: windows
+        format: zip
     files:
       - LICENSE
       - README.md
