@@ -76,6 +76,29 @@ type Report struct {
 	Findings []Finding
 }
 
+// Opts controls Diagnose behavior. Zero value means defaults.
+type Opts struct {
+	// LookbackDays bounds `git log --since`; 0 means no filter.
+	LookbackDays int
+
+	// AllowedShipTypes is the set of conventional-commit types treated
+	// as shipping the named bead. Nil/empty means the default
+	// implementation allowlist: feat, fix, perf, refactor.
+	//
+	// `spec` and any subject whose scope is `bd` or `beads` are
+	// ALWAYS treated as non-shipping regardless of this list — those
+	// are bd-management commits (filing / updating beads), not
+	// implementation work. Spec rules are codified in nonShippingScopes
+	// and parseConvCommit.
+	AllowedShipTypes []string
+}
+
+// DefaultShipTypes is the default conventional-commit type allowlist:
+// implementation work that genuinely lands a bead. Bumped to a public
+// constant so callers can extend it (e.g. add `docs` for repos that
+// ship doc beads).
+var DefaultShipTypes = []string{"feat", "fix", "perf", "refactor"}
+
 // Worst returns RED when any findings exist.
 func (r Report) Worst() Severity {
 	if len(r.Findings) == 0 {
@@ -84,19 +107,32 @@ func (r Report) Worst() Severity {
 	return RED
 }
 
-// Diagnose scans `branch` for merged commits whose subject names an
-// open or in_progress bead from the JSONL at `repo`. `prefix` is the
-// bead-id namespace (auto-derived by callers via DerivePrefix).
-//
-// `lookbackDays` limits `git log` to commits newer than that cutoff;
-// 0 means no filter. The default of 90 days is set at the cmd layer.
-//
-// Returns ([], err) when git is unavailable or the JSONL is missing.
+// Diagnose is the shipped-not-closed scanner. Existing callers pass
+// `lookbackDays` directly; new callers can use DiagnoseWithOpts to
+// configure the conventional-commit allowlist (bkg-td0.1).
 func Diagnose(repo, branch, prefix string, lookbackDays int) (Report, error) {
+	return DiagnoseWithOpts(repo, branch, prefix, Opts{LookbackDays: lookbackDays})
+}
+
+// DiagnoseWithOpts is the option-bearing scanner. Subjects are
+// classified per parseConvCommit + the supplied allowlist:
+//
+//   - `spec(<id>): ...` is NEVER shipping (bead filing / spec writing).
+//   - Subjects with scope `bd` or `beads` are NEVER shipping
+//     (`chore(bd): file <id>` etc. — bd-management).
+//   - Conventional-commit types not in the allowlist are NEVER shipping.
+//   - Bare-prefix subjects (`<id>:`, `[<id>]`) bypass the type filter
+//     because they're explicit bead-led landings.
+//   - PR-merge mode (`(#N)` marker) requires the type to be in the
+//     allowlist — otherwise a `chore(deps): bump foo (#42)` subject
+//     would falsely ship any token-bounded id elsewhere in it.
+//
+// Default allowlist: feat / fix / perf / refactor (DefaultShipTypes).
+func DiagnoseWithOpts(repo, branch, prefix string, opts Opts) (Report, error) {
 	r := Report{
 		Branch:   branch,
 		Prefix:   prefix,
-		Lookback: lookbackDays,
+		Lookback: opts.LookbackDays,
 	}
 	if !git.Available() {
 		return r, fmt.Errorf("git binary not on PATH")
@@ -107,6 +143,8 @@ func Diagnose(repo, branch, prefix string, lookbackDays int) (Report, error) {
 	if !git.RefExists(repo, branch) {
 		return r, fmt.Errorf("ref not found: %s", branch)
 	}
+
+	allowed := allowedTypeSet(opts.AllowedShipTypes)
 
 	openIDs, err := readOpenIssueIDs(repo)
 	if err != nil {
@@ -127,8 +165,8 @@ func Diagnose(repo, branch, prefix string, lookbackDays int) (Report, error) {
 		"--grep=" + prefix,
 		branch,
 	}
-	if lookbackDays > 0 {
-		since := time.Now().AddDate(0, 0, -lookbackDays).Format("2006-01-02")
+	if opts.LookbackDays > 0 {
+		since := time.Now().AddDate(0, 0, -opts.LookbackDays).Format("2006-01-02")
 		args = append(args, "--since="+since)
 	}
 	rc, stdout, _, _ := git.Run(args, repo, 30*time.Second)
@@ -158,11 +196,15 @@ func Diagnose(repo, branch, prefix string, lookbackDays int) (Report, error) {
 		}
 		sha, subject := parts[0], parts[1]
 		hasPR := prRe.MatchString(subject)
+		shape := parseConvCommit(subject)
+		if !shape.eligibleForShipping(allowed) {
+			continue
+		}
 		for id := range openIDs {
 			if _, already := seen[id]; already {
 				continue
 			}
-			if !subjectShipsBead(subject, hasPR, tokens[id], scopes[id]) {
+			if !subjectShipsBead(subject, hasPR, tokens[id], scopes[id], shape, allowed) {
 				continue
 			}
 			pr := 0
@@ -239,14 +281,95 @@ func scopeMatcher(id string) *regexp.Regexp {
 // bead) — see demo-afby for context` — are TANGENTIAL and skipped.
 // The `see / later / context` pattern that drove false positives in
 // the motivating run does NOT trigger either mode by construction.
-func subjectShipsBead(subject string, hasPR bool, token, scope *regexp.Regexp) bool {
+//
+// PR-MERGE mode additionally requires the conventional-commit type to
+// be in the allowed allowlist (passed via `shape` + `allowed`). This
+// is the bd-management filter from bkg-td0.1: a `chore(bd):` or
+// `chore(deps):` subject with a `(#N)` marker would otherwise falsely
+// ship any token-bounded bead id elsewhere in it. SCOPE mode is
+// already type-gated upstream by eligibleForShipping (the caller
+// short-circuits before this function fires).
+func subjectShipsBead(subject string, hasPR bool, token, scope *regexp.Regexp, shape convCommit, allowed map[string]bool) bool {
 	if scope.MatchString(subject) {
 		return true
 	}
 	if hasPR && token.MatchString(subject) {
-		return true
+		// PR-merge mode is only safe for known-implementation subjects:
+		// either the type is allowlisted, OR the subject has no
+		// conventional prefix at all (in which case any `(#N)`
+		// landing on a token-bounded id is the agent-of-record signal).
+		if shape.ctype == "" || allowed[shape.ctype] {
+			return true
+		}
 	}
 	return false
+}
+
+// convCommit is a parsed conventional-commit subject head. Empty
+// strings mean the subject didn't follow the `<type>(<scope>):` form
+// at the start.
+type convCommit struct {
+	ctype string
+	scope string
+}
+
+var convCommitRe = regexp.MustCompile(`^([A-Za-z]+)(?:\(([^)]*)\))?:`)
+
+// parseConvCommit extracts the leading `<type>` and optional
+// `<scope>` from a commit subject. Returns the zero value when the
+// subject doesn't open with a conventional prefix.
+func parseConvCommit(subject string) convCommit {
+	m := convCommitRe.FindStringSubmatch(subject)
+	if m == nil {
+		return convCommit{}
+	}
+	return convCommit{ctype: strings.ToLower(m[1]), scope: strings.ToLower(strings.TrimSpace(m[2]))}
+}
+
+// nonShippingScopes lists conventional-commit scopes that always
+// suppress shipping regardless of type. These cover bd-management
+// commits whose subjects name beads they file or update — exactly
+// the false-positive class that bkg-td0.1 fixes.
+var nonShippingScopes = map[string]bool{
+	"bd":    true,
+	"beads": true,
+}
+
+// nonShippingTypes lists conventional-commit types that always
+// suppress shipping. `spec` is the bead-spec / epic-filing pattern.
+var nonShippingTypes = map[string]bool{
+	"spec": true,
+}
+
+// eligibleForShipping returns false when the subject's type / scope
+// rules out shipping a bead regardless of id-position. Subjects with
+// no conventional prefix (ctype == "") are eligible — the bare-prefix
+// `<id>:` and `[<id>]` shapes still land beads.
+func (c convCommit) eligibleForShipping(allowed map[string]bool) bool {
+	if nonShippingScopes[c.scope] {
+		return false
+	}
+	if nonShippingTypes[c.ctype] {
+		return false
+	}
+	if c.ctype == "" {
+		return true
+	}
+	return allowed[c.ctype]
+}
+
+// allowedTypeSet builds the allowlist map for DiagnoseWithOpts. nil /
+// empty -> DefaultShipTypes. Comparison is case-insensitive on the
+// caller-supplied list (we lowercase both sides).
+func allowedTypeSet(types []string) map[string]bool {
+	if len(types) == 0 {
+		types = DefaultShipTypes
+	}
+	out := make(map[string]bool, len(types))
+	for _, t := range types {
+		out[strings.ToLower(t)] = true
+	}
+	return out
 }
 
 // DerivePrefix infers the bead-id prefix from the JSONL: takes the

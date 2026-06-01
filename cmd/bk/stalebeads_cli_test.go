@@ -136,6 +136,76 @@ func TestCLIGuardStaleBeadsMissingBranchExits64(t *testing.T) {
 	}
 }
 
+func TestCLIGuardStaleBeadsExcludesBdManagement(t *testing.T) {
+	// Ensures the bkg-td0.1 acceptance: spec(...) and chore(bd|beads):
+	// subjects are not shipped even when they carry token-bounded ids
+	// and a (#N) PR-merge marker. Tangential subjects with non-allowed
+	// types are silently skipped.
+	dir := initStaleBeadsRepo(t,
+		[]map[string]any{
+			{"id": "demo-1k8x", "status": "in_progress"}, // false positive in real run
+			{"id": "demo-5ctm", "status": "in_progress"},
+			{"id": "demo-h2ud", "status": "in_progress"},
+			{"id": "demo-real", "status": "in_progress"}, // genuine
+		},
+		[]string{
+			"spec(demo-1k8x): file epic + children (#830)",
+			"chore(bd): file demo-5ctm and demo-km84 (#1052)",
+			"chore(bd): file demo-app onboarding bead (demo-h2ud) (#1003)",
+			"feat(demo-real): legitimate landing (#42)",
+		},
+	)
+	out, _, _ := runCmd(t, "guard", "stale-beads",
+		"--repo", dir, "--branch", "main", "--json")
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatalf("bad json: %v\n%s", err, out)
+	}
+	fs := doc["findings"].([]any)
+	if len(fs) != 1 {
+		t.Fatalf("findings=%d want 1 (only demo-real); got: %v", len(fs), fs)
+	}
+	hit := fs[0].(map[string]any)
+	if hit["id"] != "demo-real" {
+		t.Fatalf("wrong id flagged: %v", hit["id"])
+	}
+}
+
+func TestCLIGuardStaleBeadsShipTypesFlag(t *testing.T) {
+	// `--ship-types` lets a repo opt into different conventional-commit
+	// types. Default excludes `docs`; setting it to docs alone makes
+	// docs-typed commits ship and feat-typed not.
+	dir := initStaleBeadsRepo(t,
+		[]map[string]any{
+			{"id": "demo-feat", "status": "in_progress"},
+			{"id": "demo-docs", "status": "in_progress"},
+		},
+		[]string{
+			"feat(demo-feat): land impl (#1)",
+			"docs(demo-docs): land doc (#2)",
+		},
+	)
+	// Default: only feat ships.
+	out, _, _ := runCmd(t, "guard", "stale-beads",
+		"--repo", dir, "--branch", "main", "--json")
+	var doc map[string]any
+	_ = json.Unmarshal([]byte(out), &doc)
+	if len(doc["findings"].([]any)) != 1 {
+		t.Fatalf("default: want 1 finding (feat); got %v", doc["findings"])
+	}
+	// Override -> only docs ships.
+	out, _, _ = runCmd(t, "guard", "stale-beads",
+		"--repo", dir, "--branch", "main", "--ship-types", "docs", "--json")
+	_ = json.Unmarshal([]byte(out), &doc)
+	fs := doc["findings"].([]any)
+	if len(fs) != 1 {
+		t.Fatalf("docs override: want 1 finding (docs); got %v", fs)
+	}
+	if fs[0].(map[string]any)["id"] != "demo-docs" {
+		t.Fatalf("wrong id under docs override: %v", fs[0])
+	}
+}
+
 func TestCLIGuardStaleBeadsJSONShape(t *testing.T) {
 	dir := initStaleBeadsRepo(t,
 		[]map[string]any{{"id": "demo-x", "status": "in_progress"}},

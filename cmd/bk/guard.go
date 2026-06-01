@@ -30,11 +30,12 @@ func newGuardCmd() *cobra.Command {
 // `bk guard stale-beads` — git<->backlog reconciliation.
 func newGuardStaleBeadsCmd() *cobra.Command {
 	var (
-		repo     string
-		branch   string
-		prefix   string
-		lookback int
-		jsonOut  bool
+		repo      string
+		branch    string
+		prefix    string
+		lookback  int
+		jsonOut   bool
+		shipTypes []string
 	)
 	c := &cobra.Command{
 		Use:   "stale-beads [path]",
@@ -90,7 +91,10 @@ Exit codes (per bk contract):
 				}
 			}
 
-			r, err := staleship.Diagnose(repo, branch, prefix, lookback)
+			r, err := staleship.DiagnoseWithOpts(repo, branch, prefix, staleship.Opts{
+				LookbackDays:     lookback,
+				AllowedShipTypes: shipTypes,
+			})
 			if err != nil {
 				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "error: %s\n", err)
 				silentExit(1)
@@ -140,6 +144,9 @@ Exit codes (per bk contract):
 	c.Flags().StringVar(&prefix, "prefix", "", "bead-id prefix (default: derived from JSONL)")
 	c.Flags().IntVar(&lookback, "lookback-days", 90, "limit git log to last N days (0 = no filter)")
 	c.Flags().BoolVar(&jsonOut, "json", false, "emit JSON")
+	c.Flags().StringSliceVar(&shipTypes, "ship-types", nil,
+		"conventional-commit types treated as shipping (default: feat,fix,perf,refactor); "+
+			"`spec` and scope `bd`/`beads` are always non-shipping regardless")
 	return c
 }
 
