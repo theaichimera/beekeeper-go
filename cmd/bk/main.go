@@ -23,9 +23,13 @@ var (
 
 func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
-		Use:           "bk",
-		Short:         "Operations layer for beads (bd).",
-		Long:          "Beekeeper Go — single-binary operations layer for the bd issue tracker.",
+		Use:   "bk",
+		Short: "Operations layer for beads (bd).",
+		Long:  "Beekeeper Go — single-binary operations layer for the bd issue tracker.",
+		// Setting Version auto-wires `--version` and `-v` on the root
+		// command (cobra does this internally). The `bk version`
+		// subcommand stays for back-compat. Fixes bkg-qp4.
+		Version:       Version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
