@@ -2,10 +2,14 @@
 
 **An operations layer for [beads](https://github.com/steveyegge/beads) — keep many bead-hives healthy across all your projects.**
 
-`bk` is the Go port of [beadkeeper](https://github.com/theaichimera/beadkeeper) (Python).
-Both versions read and write the same `.beads/` directory and shell out to the same `bd` /
-`git` binaries, so they're interchangeable per-invocation. The Go binary is the recommended
-on-disk form: one statically-linked file, no Python interpreter, no venv.
+`bk` is a **manager for beads, not a replacement.** It's a single statically-linked binary —
+no runtime to install, no server — that operates on the same `.beads/` directory your beads
+install already uses, shelling out to the same `bd` / `git` binaries rather than reimplementing
+them. It owns *operational health* state; it never owns *issue* data (that stays in beads /
+JSONL / git).
+
+> **Why an add-on, and how is this different from Dolt / cr-sqlite / git-bug?**
+> See **[docs/POSITIONING.md](docs/POSITIONING.md)**.
 
 ## What it does
 
@@ -101,7 +105,7 @@ only at the projects `bk` inspects.
 
 ## Exit-code contract
 
-Every subcommand uses the same exit-code language. Mirrors the Python tool exactly.
+Every subcommand uses the same exit-code language.
 
 | Code | Meaning |
 |---|---|
@@ -437,35 +441,16 @@ bk prompt-indicator >> ~/.zshrc
 # then in PROMPT/PS1: ... $(beadkeeper_prompt) ...
 ```
 
-## Interop with Python beadkeeper
+## What `bk` does *not* do
 
-`bk` and `beadkeeper` are interchangeable per-invocation. They:
+`bk` is deliberately narrow. It **owns no issue data** — issues live in beads'
+`.beads/issues.jsonl` and your git history, and `bk` only ever reads them or shells out to
+`bd` to mutate them. It runs **no server and no daemon**, persists nothing of its own except
+a small on-disk health cache, and never rewrites git history or force-pushes.
 
-- Read and write the **same** `.beads/issues.jsonl` (and the same `.beads/config.json`
-  fallback for `sync.branch`).
-- Read the **same** `.beadkeeper/identity.toml`.
-- Honor the **same** environment variables: `BEADKEEPER_FILESYNC_ROOTS`, `BD_ACTOR`,
-  `BEADKEEPER_BLOCK_ON_RED`, `BEADKEEPER_SKIP_HOOK`.
-- Install hooks with the **identical marker** (`# beadkeeper-managed: pre-push v1`), so a
-  Python-installed hook is recognised by `bk uninstall-hooks` and vice versa.
-- Use the same `bd` / `git` shell-out boundary — no in-process re-implementation of either.
-
-That means in any given workspace you can:
-
-```bash
-beadkeeper doctor .   # Python; venv-driven
-# ... and later, on the same repo ...
-bk doctor .           # Go; statically linked
-```
-
-…and both report the same severity. Behavioral parity is enforced by the diff harness in
-[`tools/diffharness/`](tools/diffharness/) — see [`docs/PARITY.md`](docs/PARITY.md) for
-the test-by-test 133→Go map and the accepted-divergence ledger (8 cross-language
-idiomatic deltas, all fully whitelisted).
-
-When in doubt: prefer `bk` for one-shot CI invocations (single static binary, no setup);
-prefer `beadkeeper` when you're already in a Python environment and want pip-style
-extensibility.
+For how this compares to data-versioning engines like Dolt, cr-sqlite, and git-bug — and why
+the right shape here is an add-on rather than a new storage layer — see
+**[docs/POSITIONING.md](docs/POSITIONING.md)**.
 
 ## Status
 
@@ -473,7 +458,7 @@ extensibility.
 - M1 — Shared core: ✅
 - M2 — Read-only commands: ✅
 - M3 — Mutation + coordination: ✅
-- M4 — Test parity & diff harness: ✅
+- M4 — Test suite & coverage: ✅
 - M5 — Distribution & cutover: ✅
 - M6 — Coordination harness coverage: ✅
 
