@@ -105,7 +105,3 @@ suffice."
 4. **Cross-project by default.** `bk` sees all your repos' hives at once.
 5. **Dogfood.** `bk`'s own bead database lives outside any file-sync folder and uses a
    dedicated sync branch from commit #1.
-
----
-
-*This consolidates the original scope / rejected-alternatives reasoning into the `bk` docs.*
