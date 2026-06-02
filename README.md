@@ -101,6 +101,7 @@ only at the projects `bk` inspects.
 | `bk lease claim` / `release` / `list` | Per-issue lease discipline via canonical identity |
 | `bk merge-slot acquire` / `release` / `status` | Serialize merge+deploy across agents |
 | `bk install-hooks` / `prompt-indicator` | Drift gate at commit time, health at push time, dot in your shell prompt |
+| `bk export` | Emit a vectorizable bead corpus (NDJSON / JSON), one document per bead |
 | `bk version` | Print the binary version |
 
 ## Exit-code contract
@@ -440,6 +441,68 @@ Sourceable shell snippet that prints a colored dot when the current dir's neares
 bk prompt-indicator >> ~/.zshrc
 # then in PROMPT/PS1: ... $(beadkeeper_prompt) ...
 ```
+
+### `bk export` — vectorizable bead corpus
+
+Walks `.beads/` projects across the supplied paths and emits one document per bead, NDJSON
+by default. Read-only. Reads the **authoritative** bead state (sync-branch JSONL when
+configured, working tree as fallback), normalizes actor identities through
+`.beadkeeper/identity.toml`, and pulls comments via `bd comments <id> --json`. The output
+is meant for any vector store — `bk` does not embed or index, only produces the corpus.
+
+```bash
+bk export                                 # NDJSON to stdout from current dir
+bk export ~/code -o corpus.ndjson         # walk a tree, write to file
+bk export --format json --decisions-only  # JSON array, only is_decision=true beads
+bk export --since 14d --no-comments       # incremental re-index, skip per-bead bd calls
+bk export --status open --type feature,task --labels adr,decision
+bk export --fields id,title,text,labels   # narrow projection for cost control
+bk export --redact                        # scrub emails + PAT-shaped tokens from text
+```
+
+**Document schema** (one object per bead; stable across `bd` versions):
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | string | bead id (e.g. `bkg-9cs`); use as the vector `source_uri` for idempotent overwrite |
+| `repo` | string | absolute project root |
+| `title`, `body` | string | from `description` field |
+| `comments` | array of `{author, body, created_at}` | from `bd comments <id> --json`; identities normalized |
+| `text` | string | assembled embedding payload, see `--text-template` |
+| `status`, `issue_type`, `priority`, `labels`, `assignee` | as in JSONL; assignee normalized |
+| `deps` | `{blocks: [...], blocked_by: [...]}` | resolved within the same project |
+| `created_at`, `updated_at`, `closed_at` | RFC3339 strings |
+| `is_routine` | bool | label-driven (`chore`/`typo`/`bump`/`deps`/`docs`) + short-body fallback |
+| `is_decision` | bool | label-driven (`decision`/`adr`/`architecture`/`design`) + phrase fallback |
+| `richness` | int | `len(body) + sum(len(comment.body))` |
+| `superseded_by` | array of bead ids | derived from close_reason text patterns |
+| `schema_version` | int | bumps on field removal / rename |
+
+**Tuning flags:**
+
+| Flag | Default | What |
+|---|---|---|
+| `--format ndjson\|json` | `ndjson` | streaming vs single array |
+| `-o, --output PATH` | stdout | write to file |
+| `--status open\|closed\|all` | `all` | status filter |
+| `--type a,b` | (none) | include only these `issue_type` values |
+| `--labels a,b` / `--exclude-labels a,b` | (none) | label include/exclude |
+| `--since DATE` | (none) | RFC3339, `YYYY-MM-DD`, `<N>d`, or `<N>h`; incremental re-index |
+| `--include-comments` / `--no-comments` | included | shells `bd comments <id>` per bead |
+| `--include-closed` | true | closed beads carry decision-history value |
+| `--classify` | true | compute `is_routine` / `is_decision` / `richness` |
+| `--min-richness N` | 0 | drop docs below threshold |
+| `--decisions-only` | false | keep only `is_decision=true` |
+| `--text-template TPL` | `{{title}}\n\n{{body}}\n\n{{comments}}` | mustache-ish substitution |
+| `--fields a,b,c` | all | project to subset of schema fields |
+| `--repo-filter GLOB` | (none) | restrict to matching projects |
+| `--redact` | false | scrub emails + GitHub-style tokens from text fields |
+
+Classification heuristics are a ranking aid, not ground truth. They emit as METADATA flags;
+the indexer or query decides what to filter. Re-runs are deterministic (sort by repo, then
+bead id) so corpus diffs are stable.
+
+`bk` is intentionally not the vector layer — embedding + indexing live in a separate consumer.
 
 ## What `bk` does *not* do
 
