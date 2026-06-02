@@ -18,8 +18,8 @@ on-disk form: one statically-linked file, no Python interpreter, no venv.
   discipline, serialized merge+deploy, out-of-band JSONL replay onto trunk.
 - **Identity (`bk identity check|normalize`)** — canonical actor handles via
   `.beadkeeper/identity.toml`.
-- **Hooks (`bk install-hooks`, `bk prompt-indicator`)** — sync-death alarm at push time, a
-  colored dot in your shell prompt when health goes non-GREEN.
+- **Hooks (`bk install-hooks`, `bk prompt-indicator`)** — commit-time drift gate + sync-death
+  alarm at push time, a colored dot in your shell prompt when health goes non-GREEN.
 
 ## Install
 
@@ -45,7 +45,7 @@ Each release ships statically-linked binaries for **macOS, Linux, and Windows** 
 **macOS / Linux:**
 
 ```bash
-VERSION=0.1.1          # set to the latest release tag (without the leading v)
+VERSION=0.3.0          # set to the latest release tag (without the leading v)
 OS=linux               # darwin | linux
 ARCH=x86_64            # x86_64 | arm64
 curl -L -o bk.tar.gz "https://github.com/theaichimera/beekeeper-go/releases/download/v${VERSION}/beekeeper-go_${VERSION}_${OS}_${ARCH}.tar.gz"
@@ -57,7 +57,7 @@ bk version
 **Windows (PowerShell):**
 
 ```powershell
-$Version = "0.1.1"                     # set to the latest release tag (without the leading v)
+$Version = "0.3.0"                     # set to the latest release tag (without the leading v)
 $Arch    = "x86_64"                    # x86_64 | arm64
 Invoke-WebRequest "https://github.com/theaichimera/beekeeper-go/releases/download/v$Version/beekeeper-go_${Version}_windows_$Arch.zip" -OutFile bk.zip
 Expand-Archive bk.zip -DestinationPath .
@@ -96,7 +96,7 @@ only at the projects `bk` inspects.
 | `bk trunk-sync` | Reconcile bead JSONL drift between trunk and the sync branch (`--apply`) |
 | `bk lease claim` / `release` / `list` | Per-issue lease discipline via canonical identity |
 | `bk merge-slot acquire` / `release` / `status` | Serialize merge+deploy across agents |
-| `bk install-hooks` / `prompt-indicator` | Surface health at push time and in your shell prompt |
+| `bk install-hooks` / `prompt-indicator` | Drift gate at commit time, health at push time, dot in your shell prompt |
 | `bk version` | Print the binary version |
 
 ## Exit-code contract
@@ -223,7 +223,8 @@ jobs:
           fetch-depth: 0   # pr-beads needs both refs reachable
       - name: Install bk
         run: |
-          curl -sL https://github.com/theaichimera/beekeeper-go/releases/latest/download/beekeeper-go_linux_x86_64.tar.gz | tar -xz
+          TAG=$(curl -fsSL https://api.github.com/repos/theaichimera/beekeeper-go/releases/latest | grep -oP '"tag_name":\s*"\K[^"]+')
+          curl -fsSL "https://github.com/theaichimera/beekeeper-go/releases/download/${TAG}/beekeeper-go_${TAG#v}_linux_x86_64.tar.gz" | tar -xz
           sudo install -m 0755 bk /usr/local/bin/bk
       - name: Guard pr-beads
         env:
@@ -476,7 +477,7 @@ extensibility.
 - M5 — Distribution & cutover: ✅
 - M6 — Coordination harness coverage: ✅
 
-`v0.1.0` is released and public — install via Homebrew or a direct download above.
+`v0.3.0` is released and public — install via Homebrew or a direct download above.
 
 ## License
 
