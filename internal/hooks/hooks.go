@@ -23,6 +23,18 @@ import (
 // (and vice versa).
 const Marker = "# beadkeeper-managed: pre-push v1"
 
+// PreCommitMarker identifies the bk-managed pre-commit drift-guard
+// hook (bkg-59b). Distinct from `Marker` so doctor's hook-presence
+// check (bkg-6h7) can tell whether bk's drift guard is installed —
+// bd's flush-only pre-commit shares the file but lacks this line.
+const PreCommitMarker = "# bk-managed: pre-commit drift-guard v1"
+
+// PreCommitChainedSuffix names the file `InstallPreCommit` moves an
+// existing non-bk pre-commit to before installing the bk wrapper. The
+// wrapper exec's it after the drift gate so bd's flush-only hook keeps
+// firing on every commit.
+const PreCommitChainedSuffix = "pre-commit.bk-chained"
+
 // InstallResult mirrors Python's InstallResult.
 type InstallResult struct {
 	Path          string
@@ -165,6 +177,75 @@ func RenderPrePush(defaultBlock bool) string {
 	return fmt.Sprintf(prePushTemplate, Marker, preferredBinary, preferredBinary, preferredBinary, flag)
 }
 
+// preCommitTemplate is the pre-commit drift-guard hook template
+// (bkg-59b). It calls `bk doctor --gate`, which performs the cheap
+// drift scan and exits per the bk contract:
+//
+//	0 GREEN, 1 YELLOW (warn), 2 RED (or YELLOW if BK_DRIFT_BLOCK=1)
+//
+// If a non-bk pre-commit existed when InstallPreCommit ran, it was
+// moved to `pre-commit.bk-chained`; this wrapper exec's that next so
+// bd's flush-only hook (or any other) keeps firing on every commit.
+//
+// Override knobs:
+//
+//	BK_DRIFT_SKIP=1   — bypass the drift gate entirely (emergency commits)
+//	BK_DRIFT_BLOCK=1  — make the gate block the commit on YELLOW (default: warn)
+const preCommitTemplate = `#!/usr/bin/env bash
+%s
+# bk pre-commit drift-guard. Cheap (no pr-beads diff) — runs:
+#   - rev-list --count to detect "branch behind base"
+#   - reads bd sync.branch + sync-state for "needs_manual_sync"
+# Then exec's the chained hook (.git/hooks/pre-commit.bk-chained) if any.
+#
+# Override:
+#   BK_DRIFT_SKIP=1   bypass entirely (emergency commits).
+#   BK_DRIFT_BLOCK=1  make YELLOW findings block instead of warn.
+#
+# Uninstall: ` + "`bk uninstall-hooks`" + `.
+
+set -u
+
+if [ "${BK_DRIFT_SKIP:-0}" = "1" ]; then
+  exit 0
+fi
+
+BK=%s
+REPO_DIR="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+
+if command -v $BK >/dev/null 2>&1; then
+  GATE_FLAGS="--gate"
+  if [ "${BK_DRIFT_BLOCK:-0}" = "1" ]; then
+    GATE_FLAGS="--gate --strict"
+  fi
+  $BK doctor "$REPO_DIR" $GATE_FLAGS
+  rc=$?
+  # Exit codes from drift gate:
+  #   0 GREEN (silent)
+  #   1 YELLOW warn (allow commit, message already on stderr)
+  #   2 RED or --strict YELLOW -> block
+  if [ "$rc" -eq 2 ]; then
+    printf "\nbk: BLOCKING commit — drift gate reported RED. Override with BK_DRIFT_SKIP=1.\n" >&2
+    exit 1
+  fi
+fi
+
+# Chain to any pre-existing pre-commit (e.g. bd's flush-only hook).
+CHAINED="$(dirname "$0")/pre-commit.bk-chained"
+if [ -x "$CHAINED" ]; then
+  exec "$CHAINED" "$@"
+fi
+exit 0
+`
+
+// RenderPreCommit builds the pre-commit drift-guard hook script. The
+// rendered body always includes both PreCommitMarker (so doctor /
+// idempotent re-install can detect it) and the chain-exec line at
+// the bottom.
+func RenderPreCommit() string {
+	return fmt.Sprintf(preCommitTemplate, PreCommitMarker, preferredBinary)
+}
+
 // RenderPromptIndicator builds the sourceable prompt indicator script.
 func RenderPromptIndicator() string {
 	return fmt.Sprintf(promptIndicatorTemplate, Marker, preferredBinary)
@@ -200,6 +281,106 @@ func InstallPrePush(repo string, defaultBlock, force bool) InstallResult {
 		return InstallResult{
 			Path:          target,
 			SkippedReason: err.Error(),
+		}
+	}
+	return InstallResult{Path: target, Written: true}
+}
+
+// InstallPreCommit installs `.git/hooks/pre-commit` for `repo` with
+// the bk drift-guard wrapper. If a non-bk hook already lives there
+// (typical: bd's `bd sync --flush-only` hook), it's preserved by
+// being moved to `pre-commit.bk-chained`; the wrapper exec's it after
+// the drift gate so bd's flush still fires on every commit.
+//
+// Idempotent: re-installing detects PreCommitMarker and rewrites the
+// wrapper without touching the chained file. Refuses to overwrite a
+// foreign pre-commit (i.e. one without our marker AND without bd's
+// expected shape) unless `force` is true.
+//
+// Returns the install path; SkippedReason populated when the install
+// could not proceed (no .git, write error, foreign hook without
+// --force, etc.).
+func InstallPreCommit(repo string, force bool) InstallResult {
+	gitDir := resolveGitDir(repo)
+	if gitDir == "" {
+		return InstallResult{
+			Path:          filepath.Join(repo, ".git", "hooks", "pre-commit"),
+			SkippedReason: "not a git working tree",
+		}
+	}
+	hooksDir := filepath.Join(gitDir, "hooks")
+	_ = os.MkdirAll(hooksDir, 0o755)
+	target := filepath.Join(hooksDir, "pre-commit")
+	chained := filepath.Join(hooksDir, PreCommitChainedSuffix)
+
+	existing, readErr := os.ReadFile(target)
+	if readErr == nil {
+		body := string(existing)
+		if strings.Contains(body, PreCommitMarker) {
+			// Idempotent re-install: just rewrite the wrapper. Leave
+			// any chained file untouched — re-installing should NOT
+			// re-chain whatever is currently at `pre-commit`, because
+			// that file IS the bk wrapper.
+			if err := os.WriteFile(target, []byte(RenderPreCommit()), 0o755); err != nil {
+				return InstallResult{Path: target, SkippedReason: err.Error()}
+			}
+			return InstallResult{Path: target, Written: true}
+		}
+		// Foreign hook present. Without --force, only allow chaining
+		// when there's no existing chained file (don't clobber a
+		// previous chain). With --force, always chain (overwrite the
+		// chained file).
+		if _, statErr := os.Stat(chained); statErr == nil && !force {
+			return InstallResult{
+				Path: target,
+				SkippedReason: "a non-bk pre-commit hook is present and `pre-commit.bk-chained` " +
+					"already exists; re-run with --force to overwrite, or merge by hand",
+			}
+		}
+		// Move existing -> chained, preserving exec bit.
+		if err := os.WriteFile(chained, existing, 0o755); err != nil {
+			return InstallResult{Path: target, SkippedReason: err.Error()}
+		}
+	} else if !errors.Is(readErr, os.ErrNotExist) {
+		return InstallResult{Path: target, SkippedReason: readErr.Error()}
+	}
+
+	if err := os.WriteFile(target, []byte(RenderPreCommit()), 0o755); err != nil {
+		return InstallResult{Path: target, SkippedReason: err.Error()}
+	}
+	return InstallResult{Path: target, Written: true}
+}
+
+// UninstallPreCommit removes only marker-bearing hooks AND restores
+// any chained predecessor in place.
+func UninstallPreCommit(repo string) InstallResult {
+	gitDir := resolveGitDir(repo)
+	if gitDir == "" {
+		return InstallResult{
+			Path:          filepath.Join(repo, ".git", "hooks", "pre-commit"),
+			SkippedReason: "not a git working tree",
+		}
+	}
+	target := filepath.Join(gitDir, "hooks", "pre-commit")
+	chained := filepath.Join(gitDir, "hooks", PreCommitChainedSuffix)
+
+	data, err := os.ReadFile(target)
+	if errors.Is(err, os.ErrNotExist) {
+		return InstallResult{Path: target, SkippedReason: "no hook installed"}
+	}
+	if err != nil {
+		return InstallResult{Path: target, SkippedReason: err.Error()}
+	}
+	if !strings.Contains(string(data), PreCommitMarker) {
+		return InstallResult{Path: target, SkippedReason: "hook is not bk-managed (no marker)"}
+	}
+	if err := os.Remove(target); err != nil {
+		return InstallResult{Path: target, SkippedReason: err.Error()}
+	}
+	// Restore chained predecessor, if any.
+	if chainedData, err := os.ReadFile(chained); err == nil {
+		if err := os.WriteFile(target, chainedData, 0o755); err == nil {
+			_ = os.Remove(chained)
 		}
 	}
 	return InstallResult{Path: target, Written: true}

@@ -382,21 +382,49 @@ bk merge-slot acquire --repo . --holder alice
 bk merge-slot release --repo . --holder alice
 ```
 
-### `bk install-hooks` — sync-death alarm
+### `bk install-hooks` — sync-death alarm + commit-time drift gate
 
-Installs a `pre-push` hook that runs `bk doctor` and either warns (default) or blocks on
-RED. The hook marker is shared with the Python tool — see [Interop](#interop-with-python-beadkeeper)
-below.
+Installs two git hooks:
+
+- **`pre-push`** runs `bk doctor` (and optionally `bk guard pr-beads`) before pushes.
+- **`pre-commit`** runs `bk doctor --gate` — the cheap drift gate (bkg-59b). Catches drift
+  at the COMMIT site, before bd's daemon snapshots a stale branch. If a non-bk pre-commit
+  already exists (typical: bd's `bd sync --flush-only`), it is preserved by being moved to
+  `pre-commit.bk-chained` and the bk wrapper exec's it after the gate so both keep firing
+  on every commit.
 
 ```bash
-bk install-hooks                # warn-only
-bk install-hooks --block        # block on RED
+bk install-hooks                       # warn-only
+bk install-hooks --block               # pre-push BLOCKS on RED
+bk install-hooks --skip-pre-commit     # only the legacy pre-push hook
 bk install-hooks --print-prompt-indicator  # also print the shell snippet
-bk uninstall-hooks
+bk uninstall-hooks                     # removes both, restores chained pre-commit
 ```
 
-Override at push time: `BEADKEEPER_BLOCK_ON_RED=1` (escalate) / `BEADKEEPER_SKIP_HOOK=1`
-(bypass).
+Push-time overrides: `BEADKEEPER_BLOCK_ON_RED=1` (escalate) / `BEADKEEPER_SKIP_HOOK=1` (bypass).
+Commit-time overrides: `BK_DRIFT_BLOCK=1` (block instead of warn) / `BK_DRIFT_SKIP=1` (bypass).
+
+### `bk doctor --gate` — repo-entry / commit-time drift scan
+
+Cheap, drift-only check (`bkg-59b`). Reads only `git rev-list --count`, bd's `sync.branch`,
+and the daemon's `sync-state.json`. No `pr-beads` diff, no `bd list --json`. Designed to
+run on every commit and on agent repo-entry.
+
+```bash
+bk doctor --gate                          # warn (rc=1) on YELLOW
+bk doctor --gate --strict                 # block (rc=2) on YELLOW
+bk doctor --gate --behind-threshold 100   # custom behind-base limit (default 50)
+bk doctor --gate --base origin/develop    # custom base ref
+bk doctor --gate --json                   # full JSON for agents
+```
+
+Exit codes: 0 GREEN / 1 YELLOW (warn) / 2 RED (or `--strict` YELLOW). Findings:
+
+| Kind | Severity | When |
+|---|---|---|
+| `behind-base` | YELLOW | branch is more than N commits behind base ref |
+| `missing-sync-branch` | YELLOW | bd `sync.branch` is empty / unset |
+| `needs-manual-sync` | RED | bd's `sync-state.json` reports the daemon gave up |
 
 ### `bk prompt-indicator` — shell prompt dot
 
