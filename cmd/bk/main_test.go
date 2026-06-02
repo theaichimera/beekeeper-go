@@ -7,7 +7,10 @@ import (
 )
 
 func TestVersionCommandPrintsVersion(t *testing.T) {
-	t.Parallel()
+	// NOT t.Parallel: mutates package-level Version, which is now
+	// read by newRootCmd's cobra struct literal (bkg-qp4). Racing
+	// against any other parallel test that builds the root would
+	// trigger -race; serialize this one.
 
 	// Pin a known version for the duration of this test.
 	orig := Version
@@ -64,7 +67,9 @@ func TestRootVersionFlag(t *testing.T) {
 }
 
 func TestRootCommandHasVersionSubcommand(t *testing.T) {
-	t.Parallel()
+	// NOT t.Parallel: newRootCmd reads package-level Version (bkg-qp4),
+	// so this races with TestVersionCommandPrintsVersion / TestRootVersionFlag
+	// under -race. Subcommand-registration check is fast; serialize.
 	root := newRootCmd()
 	found := false
 	for _, c := range root.Commands() {
