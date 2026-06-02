@@ -22,6 +22,7 @@ import (
 	"github.com/theaichimera/beekeeper-go/internal/daemons"
 	"github.com/theaichimera/beekeeper-go/internal/filesync"
 	"github.com/theaichimera/beekeeper-go/internal/git"
+	"github.com/theaichimera/beekeeper-go/internal/hooks"
 	"github.com/theaichimera/beekeeper-go/internal/identity"
 	"github.com/theaichimera/beekeeper-go/internal/lease"
 	"github.com/theaichimera/beekeeper-go/internal/prbeads"
@@ -142,6 +143,7 @@ func diagnose(p bkproject.Project, staleDays int) ProjectHealth {
 	checks = append(checks, checkIdentity(p)...)
 	checks = append(checks, checkPRBeads(p, gitState)...)
 	checks = append(checks, checkStaleWIP(p, staleDays)...)
+	checks = append(checks, checkBkHooks(p)...)
 
 	ph := ProjectHealth{
 		ProjectRoot: p.Root,
@@ -598,6 +600,95 @@ func checkPRBeads(p bkproject.Project, g bkproject.GitState) []Check {
 			base, head, base,
 		),
 	}}
+}
+
+// --- check_bk_hooks ----------------------------------------------------
+
+// checkBkHooks reports whether bk's guard hooks (pre-push doctor +
+// pre-commit drift gate) are installed. Distinguishes the bk hooks
+// from bd's flush-only pre-commit by looking for the bk markers
+// (`hooks.Marker` for pre-push, `hooks.PreCommitMarker` for the drift
+// gate). When either is missing, emits a YELLOW finding with
+// `bk install-hooks` as the remediation. Silent when both are
+// installed.
+//
+// Skipped (no row) when the project isn't in a git working tree at
+// all — `checkGit` already covers that case as YELLOW, and a noisy
+// hook check on top would be doubly-frustrating during repo init.
+//
+// Implements bkg-6h7. Pairs with bkg-59b: the drift-guard pre-commit
+// hook is the thing this check looks for.
+func checkBkHooks(p bkproject.Project) []Check {
+	gitDir := resolveGitDirForCheck(p.Root)
+	if gitDir == "" {
+		return nil // not a working tree; checkGit already complains.
+	}
+	missing := []string{}
+	hookPath := func(name string) string {
+		return filepath.Join(gitDir, "hooks", name)
+	}
+	hasMarker := func(path, marker string) bool {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return false
+		}
+		return strings.Contains(string(data), marker)
+	}
+	if !hasMarker(hookPath("pre-push"), hooks.Marker) {
+		missing = append(missing, "pre-push")
+	}
+	if !hasMarker(hookPath("pre-commit"), hooks.PreCommitMarker) {
+		missing = append(missing, "pre-commit (drift gate)")
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	return []Check{{
+		Name:     "bk-hooks",
+		Severity: YELLOW,
+		Message: fmt.Sprintf(
+			"bk guard hook(s) missing: %s. Without them, drift accumulates "+
+				"silently between manual `bk doctor` runs.",
+			strings.Join(missing, ", "),
+		),
+		Remediation: "run `bk install-hooks` (idempotent; preserves bd's flush-only " +
+			"pre-commit by chaining it via `pre-commit.bk-chained`).",
+	}}
+}
+
+// resolveGitDirForCheck mirrors hooks.resolveGitDir; we reimplement
+// the shape locally to avoid widening the hooks package surface for
+// a single read-only consumer.
+func resolveGitDirForCheck(repo string) string {
+	abs, _ := filepath.Abs(repo)
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = resolved
+	}
+	gitPath := filepath.Join(abs, ".git")
+	info, err := os.Stat(gitPath)
+	if err != nil {
+		return ""
+	}
+	if info.IsDir() {
+		return gitPath
+	}
+	data, err := os.ReadFile(gitPath)
+	if err != nil {
+		return ""
+	}
+	const prefix = "gitdir:"
+	content := strings.TrimSpace(string(data))
+	if !strings.HasPrefix(content, prefix) {
+		return ""
+	}
+	target := strings.TrimSpace(content[len(prefix):])
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(abs, target)
+	}
+	if info, err := os.Stat(target); err == nil && info.IsDir() {
+		return target
+	}
+	return ""
 }
 
 // --- check_stale_wip ---------------------------------------------------
