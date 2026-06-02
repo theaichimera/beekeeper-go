@@ -195,6 +195,17 @@ func asExit(err error, target **exec.ExitError) bool {
 // across runs (the host pid varies).
 var pidRE = regexp.MustCompile(`pid \d+`)
 
+// goOnlyCheckNames lists `Check.name` values emitted by Go's doctor
+// but not by Python's. New Go-only checks should be added here
+// instead of removed from the wire — the Check is a real signal we
+// want to keep, just not part of the Python-vs-Go parity surface.
+// Maintained alongside docs/PARITY.md.
+var goOnlyCheckNames = map[string]struct{}{
+	"pr-beads":  {}, // bkg-lrc
+	"stale-wip": {}, // bkg-bqa.2
+	"bk-hooks":  {}, // bkg-6h7
+}
+
 // normalizeJSONForCompare returns a generic value with run-volatile
 // keys deleted so deep-equal can match across implementations.
 //
@@ -206,6 +217,8 @@ var pidRE = regexp.MustCompile(`pid \d+`)
 //   - Path strings are normalized: <projectRoot> -> "<PROJECT>", and
 //     macOS' /private/tmp prefix is stripped.
 //   - "pid <N>" -> "pid <PID>" so live daemon refusal messages match.
+//   - Check rows whose `name` is in goOnlyCheckNames are dropped from
+//     `checks[]` arrays.
 func normalizeJSONForCompare(v any, projectRoot string) any {
 	switch t := v.(type) {
 	case map[string]any:
@@ -234,6 +247,16 @@ func normalizeJSONForCompare(v any, projectRoot string) any {
 	case []any:
 		out := make([]any, 0, len(t))
 		for _, x := range t {
+			// Filter Go-only Check rows from arrays of {name, ...}
+			// entries. We detect via `name` field presence to keep the
+			// filter scoped — generic non-Check arrays pass through.
+			if obj, ok := x.(map[string]any); ok {
+				if name, ok := obj["name"].(string); ok {
+					if _, drop := goOnlyCheckNames[name]; drop {
+						continue
+					}
+				}
+			}
 			out = append(out, normalizeJSONForCompare(x, projectRoot))
 		}
 		// nil slice and empty slice should compare equal — return
