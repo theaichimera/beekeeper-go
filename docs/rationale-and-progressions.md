@@ -59,3 +59,10 @@ whether a `Why:` is meaningful belong to review (human or advisory LLM).
 - Schema source of truth: `pkg/beadspec/schemas/{epic,progression}.toml`.
 - Validation: `pkg/beadspec` (pure) + `internal/beadlint` (plumbing),
   consumed by both `bk doctor` and `bk guard beadspec`.
+
+## Agent skills
+
+Reusable, agent-agnostic skills for these workflows (setup, onboarding,
+authoring rationale, maintaining progressions) live in [`skills/`](../skills).
+Copy them into your agent's skills directory to make the workflows
+intent-discoverable.
