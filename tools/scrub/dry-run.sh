@@ -9,13 +9,15 @@ cd "$(git rev-parse --show-toplevel)"
 
 # Vendor-string allowlist. Long tokens are matched anywhere; short
 # tokens (`csod`, `esw`, `jive`) require word boundaries so they
-# don't collide with English (`Refuses While...`). git log -G uses
-# POSIX ERE which doesn't honor `\b`; we use `[[:<:]]`/`[[:>:]]`.
-# The two scrub-source tokens are bracketed (dev[f]actory / dschwart[z]i) so
-# git-filter-repo cannot rewrite this denylist when it filters the tree. The
-# regex still matches the real tokens. See verify.sh for the full rationale.
-LONG_RE='trilogy|khoros|dev[f]actory|downstream-svc|downstream-app|cloudfix|crossover|aurea|spigit|cornerstone|nomio|dschwart[z]i'
-SHORT_RE='[[:<:]](csod|esw|jive)[[:>:]]'
+# don't collide with English (`Refuses While...`). The boundary is written
+# in portable POSIX ERE (`[^[:alnum:]_]`) so it is deterministic under both
+# `git grep -E` and `git log -G` on macOS and Linux.
+# Every vendor token that scrub.sh replaces is bracketed (dev[f]actory,
+# tool[g]ate, agent[f]low, dschwart[z]i) so git-filter-repo cannot rewrite
+# this denylist when it filters the tree. The regex still matches the real
+# tokens. See verify.sh for the full rationale.
+LONG_RE='trilogy|khoros|dev[f]actory|tool[g]ate|agent[f]low|cloudfix|crossover|aurea|spigit|cornerstone|nomio|dschwart[z]i'
+SHORT_RE='(^|[^[:alnum:]_])(csod|esw|jive)([^[:alnum:]_]|$)'
 VENDOR_RE="(${LONG_RE})|${SHORT_RE}"
 
 echo "--- commits referencing vendor strings (-G regex over diffs, all refs) ---"

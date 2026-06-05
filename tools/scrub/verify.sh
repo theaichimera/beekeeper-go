@@ -8,15 +8,16 @@ set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
-# NOTE: the two scrub-source tokens are written with a bracketed letter
-# (dev[f]actory / dschwart[z]i). The regex still matches the real tokens,
-# but the file no longer contains the contiguous literal — so when scrub.sh
-# runs git-filter-repo --replace-text over the whole tree, it CANNOT rewrite
-# this denylist and turn it into a self-referential check. Do not "fix" the
-# brackets. tools/scrub/* is excluded from the scans below for the same
-# reason (scrub.sh's replacement table must hold the literal tokens).
-LONG_RE='trilogy|khoros|dev[f]actory|downstream-svc|downstream-app|cloudfix|crossover|aurea|spigit|cornerstone|nomio|dschwart[z]i'
-SHORT_RE='[[:<:]](csod|esw|jive)[[:>:]]'
+# NOTE: vendor tokens are written with a bracketed letter (e.g. dev[f]actory,
+# tool[g]ate, agent[f]low, dschwart[z]i). The regex still matches the real
+# tokens, but the file no longer contains the contiguous literal — so when
+# scrub.sh runs git-filter-repo --replace-text over the whole tree, it CANNOT
+# rewrite this denylist into a self-referential check (e.g. turning toolgate
+# into its replacement term). Every token that scrub.sh actually replaces MUST
+# be bracketed here. Do not "fix" the brackets. tools/scrub/* is also excluded
+# from the scans below for the same reason.
+LONG_RE='trilogy|khoros|dev[f]actory|tool[g]ate|agent[f]low|cloudfix|crossover|aurea|spigit|cornerstone|nomio|dschwart[z]i'
+SHORT_RE='(^|[^[:alnum:]_])(csod|esw|jive)([^[:alnum:]_]|$)'
 VENDOR_RE="(${LONG_RE})|${SHORT_RE}"
 
 fail=0

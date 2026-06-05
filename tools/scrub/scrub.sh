@@ -85,15 +85,15 @@ git remote prune origin >/dev/null 2>&1 || true
 # Build the replacement table. Pin the substitutions in a temp file so
 # git-filter-repo can read them from disk (it doesn't accept multiple
 # --replace-text flags on the CLI).
-# This table is written to a throwaway temp file (never tracked), so the
-# contiguous literals below are safe. The copies in scrub.sh's own history
-# WILL be rewritten by the filter, but tools/scrub/* is excluded from
-# verify.sh's scans, so that self-rewrite is harmless.
+# The search tokens are bracketed (agent[f]low / tool[g]ate) so they match
+# the real strings via regex but never appear as a contiguous literal in this
+# file — git-filter-repo therefore cannot self-rewrite this table into a
+# no-op (e.g. downstream-app==>downstream-app) on a subsequent run.
 repl=$(mktemp)
 trap 'rm -f "$repl"' EXIT
 cat > "$repl" <<'EOF'
-regex:(?i)downstream-app==>downstream-app
-regex:(?i)downstream-svc==>downstream-svc
+regex:(?i)agent[f]low==>downstream-app
+regex:(?i)tool[g]ate==>downstream-svc
 EOF
 
 echo "==> rewriting blobs + commit messages with git-filter-repo"
