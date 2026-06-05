@@ -1,0 +1,13 @@
+# Schema: epic
+# Epics must carry per-decision rationale, authored at creation time,
+# inside the bead body. See bkg-4zi.
+type = "epic"
+description = "Epics must carry per-decision rationale in a ## Decisions block."
+require_body_nonempty = true
+
+[[sections]]
+heading = "## Decisions"
+required = true
+non_empty = true
+# Every decision entry must be paired with its rationale.
+item_must_contain = "Why:"

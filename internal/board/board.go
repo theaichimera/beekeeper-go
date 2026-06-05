@@ -35,6 +35,34 @@ const (
 	BucketBlocked    = "blocked"
 )
 
+// ExcludedLabels lists bead labels whose beads are omitted entirely
+// from all board / ready / summary surfaces — they are not counted in
+// Total or ByStatus. Progression beads are living documents, not
+// actionable work (bkg-4zi.5). Configurable by callers; default is the
+// single `progression` label.
+var ExcludedLabels = []string{"progression"}
+
+// hasExcludedLabel reports whether a record carries any label in
+// ExcludedLabels.
+func hasExcludedLabel(rec map[string]any) bool {
+	raw, ok := rec["labels"].([]any)
+	if !ok {
+		return false
+	}
+	for _, v := range raw {
+		s, ok := v.(string)
+		if !ok {
+			continue
+		}
+		for _, ex := range ExcludedLabels {
+			if s == ex {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // Issue is one row in a bucket.
 type Issue struct {
 	ProjectRoot        string
@@ -189,6 +217,12 @@ func classifyProject(p bkproject.Project) ProjectBoard {
 		id := stringField(rec, "id")
 		st := stringField(rec, "status")
 		if id == "" {
+			continue
+		}
+		// Progression (and other excluded-label) beads are living
+		// documents, not work — drop them from every surface, including
+		// Total/ByStatus (bkg-4zi.5).
+		if hasExcludedLabel(rec) {
 			continue
 		}
 		pb.Total++

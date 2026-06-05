@@ -25,6 +25,7 @@ func newGuardCmd() *cobra.Command {
 	c.AddCommand(newGuardDaemonCmd())
 	c.AddCommand(newGuardPRBeadsCmd())
 	c.AddCommand(newGuardStaleBeadsCmd())
+	c.AddCommand(newGuardBeadspecCmd())
 	return c
 }
 

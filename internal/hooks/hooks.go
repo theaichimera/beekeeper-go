@@ -88,6 +88,15 @@ if [ "$PRBEADS_POLICY" != "off" ]; then
   PR_RC=$?
 fi
 
+# Bead-schema hard gate (bkg-4zi.6): epics must carry rationale +
+# a well-formed ## Decisions block. Always blocking (not warn-only),
+# bypass with BEADKEEPER_SKIP_HOOK=1.
+$BK guard beadspec "$REPO_DIR"
+if [ "$?" -eq 2 ]; then
+  printf "\nbeadkeeper: BLOCKING push — epic bead-schema violation(s) above. Override with BEADKEEPER_SKIP_HOOK=1.\n" >&2
+  exit 1
+fi
+
 if [ "$rc" -ne 0 ] || [ "$PR_RC" -eq 2 ]; then
   if [ "${BEADKEEPER_BLOCK_ON_RED:-%s}" = "1" ]; then
     printf "\nbeadkeeper: BLOCKING push — doctor or pr-beads reported RED. Override with BEADKEEPER_SKIP_HOOK=1.\n" >&2

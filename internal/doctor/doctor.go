@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/theaichimera/beekeeper-go/internal/beadlint"
 	"github.com/theaichimera/beekeeper-go/internal/daemons"
 	"github.com/theaichimera/beekeeper-go/internal/filesync"
 	"github.com/theaichimera/beekeeper-go/internal/git"
@@ -144,6 +145,7 @@ func diagnose(p bkproject.Project, staleDays int) ProjectHealth {
 	checks = append(checks, checkPRBeads(p, gitState)...)
 	checks = append(checks, checkStaleWIP(p, staleDays)...)
 	checks = append(checks, checkBkHooks(p)...)
+	checks = append(checks, checkBeadspec(p)...)
 
 	ph := ProjectHealth{
 		ProjectRoot: p.Root,
@@ -801,6 +803,40 @@ func ExitCode(worst Severity, strict bool) int {
 		return 1
 	}
 	return 0
+}
+
+// --- check_beadspec ----------------------------------------------------
+
+// checkBeadspec validates each non-closed bead against the schema for
+// its issue_type (pkg/beadspec) and reports violations. The rules are
+// sourced from beadspec, NOT hard-coded here — bk is the engine,
+// beadspec is the source of truth. YELLOW severity: doctor is the
+// visibility surface; the pre-push hook (bkg-4zi.6) is the hard gate.
+func checkBeadspec(p bkproject.Project) []Check {
+	findings := beadlint.ScanRepo(p.Root)
+	if len(findings) == 0 {
+		return nil
+	}
+	sample := ""
+	for i, f := range findings {
+		if i == 3 {
+			sample += fmt.Sprintf(", +%d more", len(findings)-3)
+			break
+		}
+		if i > 0 {
+			sample += ", "
+		}
+		sample += fmt.Sprintf("%s[%s]", f.BeadID, f.Rule)
+	}
+	return []Check{{
+		Name:     "bead-schema",
+		Severity: YELLOW,
+		Message:  fmt.Sprintf("%d bead-schema violation(s): %s.", len(findings), sample),
+		Remediation: "Beads must match their type schema (pkg/beadspec): epics need a non-empty " +
+			"`## Decisions` block with a `Why:` per entry; progression beads need a " +
+			"`## Current understanding` section and the `progression` label. " +
+			"The pre-push hook blocks epic violations.",
+	}}
 }
 
 // --- tiny helpers -------------------------------------------------------

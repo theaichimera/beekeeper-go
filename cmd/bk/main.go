@@ -45,6 +45,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newUninstallHooksCmd())
 	root.AddCommand(newPromptIndicatorCmd())
 	root.AddCommand(newExportCmd())
+	root.AddCommand(newProgressionCmd())
 	return root
 }
 
