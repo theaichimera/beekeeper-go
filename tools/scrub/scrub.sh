@@ -92,8 +92,8 @@ git remote prune origin >/dev/null 2>&1 || true
 repl=$(mktemp)
 trap 'rm -f "$repl"' EXIT
 cat > "$repl" <<'EOF'
-literal:vendor.example==>vendor.example
-literal:contributor==>contributor
+regex:(?i)downstream-app==>downstream-app
+regex:(?i)downstream-svc==>downstream-svc
 EOF
 
 echo "==> rewriting blobs + commit messages with git-filter-repo"
