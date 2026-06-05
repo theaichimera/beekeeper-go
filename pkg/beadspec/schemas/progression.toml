@@ -1,0 +1,15 @@
+# Schema: progression
+# A progression is a topic-scoped, living narrative bead. It is NOT
+# owned by a single epic and is kept off the work board. See bkg-4zi.
+type = "progression"
+description = "Progression beads track a topic's evolving understanding."
+require_labels = ["progression"]
+
+[[sections]]
+heading = "## Current understanding"
+required = true
+non_empty = true
+
+[[sections]]
+heading = "## Log"
+required = true
