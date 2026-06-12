@@ -22,6 +22,7 @@ import (
 	"github.com/theaichimera/beekeeper-go/internal/beadlint"
 	"github.com/theaichimera/beekeeper-go/internal/daemons"
 	"github.com/theaichimera/beekeeper-go/internal/filesync"
+	"github.com/theaichimera/beekeeper-go/internal/freshness"
 	"github.com/theaichimera/beekeeper-go/internal/git"
 	"github.com/theaichimera/beekeeper-go/internal/hooks"
 	"github.com/theaichimera/beekeeper-go/internal/identity"
@@ -133,6 +134,7 @@ func diagnose(p bkproject.Project, staleDays int) ProjectHealth {
 
 	checks := []Check{}
 	checks = append(checks, checkJSONL(p)...)
+	checks = append(checks, checkJSONLFreshness(p)...)
 	checks = append(checks, checkDBInFilesync(p)...)
 	checks = append(checks, checkGit(gitState)...)
 	checks = append(checks, checkSyncBranch(p, gitState)...)
@@ -172,6 +174,33 @@ func checkJSONL(p bkproject.Project) []Check {
 		}}
 	}
 	return nil
+}
+
+// --- check_jsonl_freshness ------------------------------------------------
+
+// checkJSONLFreshness flags projects whose bead DB (written by bd
+// immediately on mutation) is newer than `.beads/issues.jsonl`
+// (exported on a debounce by the bd daemon). Every bk read surface
+// (doctor, board, guard) reads the JSONL, so a newer DB means those
+// surfaces show stale state until `bd sync` exports. Read-side
+// detection only — bk never flushes the DB itself (bkg-ckb). Silent
+// when fresh, when the JSONL is missing (issues-jsonl owns that), or
+// when no DB exists.
+func checkJSONLFreshness(p bkproject.Project) []Check {
+	r := freshness.Probe(p.Root)
+	if !r.Stale {
+		return nil
+	}
+	return []Check{{
+		Name:     "jsonl-freshness",
+		Severity: YELLOW,
+		Message: fmt.Sprintf(
+			"bead DB (%s) has changes not yet exported to issues.jsonl (DB mtime newer by %s).",
+			filepath.Base(r.DBPath), r.DBTime.Sub(r.JSONLTime).Round(time.Second),
+		),
+		Remediation: "Run `bd sync` (or wait for the daemon flush) so doctor/board/guard " +
+			"see current state.",
+	}}
 }
 
 // --- check_db_in_filesync -----------------------------------------------

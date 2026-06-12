@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/theaichimera/beekeeper-go/internal/board"
+	"github.com/theaichimera/beekeeper-go/internal/freshness"
 	"github.com/theaichimera/beekeeper-go/internal/stalewip"
 )
 
@@ -67,6 +68,14 @@ func newBoardCmd() *cobra.Command {
 					continue
 				}
 				fmt.Fprintf(out, "=== %s ===\n", pb.ProjectRoot)
+				// Freshness banner (bkg-ckb): the board is built from the
+				// JSONL, which bd exports on a debounce after DB writes.
+				// A newer DB means the buckets below may be stale.
+				// cmd-level concern, like the stale-WIP count — the board
+				// package itself does not know about timestamps.
+				if freshness.Probe(pb.ProjectRoot).Stale {
+					fmt.Fprintln(out, "  NOTE: bead DB is newer than .beads/issues.jsonl — board may be stale; run `bd sync`.")
+				}
 				if showReady && len(pb.Ready) > 0 {
 					fmt.Fprintln(out, "READY")
 					for _, i := range pb.Ready {

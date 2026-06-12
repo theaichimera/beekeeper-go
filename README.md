@@ -125,8 +125,8 @@ Use `--strict` on any subcommand that produces a YELLOW finding (`doctor`, `boar
 ### `bk doctor` — cross-project health scan
 
 Walks each path looking for `.beads/` and reports per-project health. The check set:
-`issues-jsonl`, `db-in-filesync`, `git`, `git-upstream`, `sync-branch`, `daemon`,
-`sync-state`, `daemon-hygiene`, `trunk-sync`, `lease`, `identity`.
+`issues-jsonl`, `jsonl-freshness`, `db-in-filesync`, `git`, `git-upstream`, `sync-branch`,
+`daemon`, `sync-state`, `daemon-hygiene`, `trunk-sync`, `lease`, `identity`.
 
 ```bash
 bk doctor                          # current dir

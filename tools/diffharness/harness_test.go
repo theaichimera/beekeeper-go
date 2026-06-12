@@ -201,9 +201,10 @@ var pidRE = regexp.MustCompile(`pid \d+`)
 // want to keep, just not part of the Python-vs-Go parity surface.
 // Maintained alongside docs/PARITY.md.
 var goOnlyCheckNames = map[string]struct{}{
-	"pr-beads":  {}, // bkg-lrc
-	"stale-wip": {}, // bkg-bqa.2
-	"bk-hooks":  {}, // bkg-6h7
+	"pr-beads":        {}, // bkg-lrc
+	"stale-wip":       {}, // bkg-bqa.2
+	"bk-hooks":        {}, // bkg-6h7
+	"jsonl-freshness": {}, // bkg-ckb
 }
 
 // normalizeJSONForCompare returns a generic value with run-volatile

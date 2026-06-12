@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/theaichimera/beekeeper-go/internal/beadlint"
+	"github.com/theaichimera/beekeeper-go/internal/freshness"
 )
 
 // newGuardBeadspecCmd implements `bk guard beadspec` — the hard gate
@@ -65,6 +66,18 @@ Exit codes:
 				fmt.Fprintf(cmd.ErrOrStderr(),
 					"\nbk: %d blocking bead-schema violation(s). Fix the bead(s) above, "+
 						"or bypass this push with BEADKEEPER_SKIP_HOOK=1.\n", len(blocking))
+				// The gate validates the working-tree JSONL (that's what
+				// gets pushed), but bd writes mutations to its DB first
+				// and exports on a debounce. When the DB is newer, the
+				// fix may already exist there — point at `bd sync`
+				// instead of letting the agent re-edit the bead (bkg-ckb).
+				// Never changes the pass/fail decision.
+				if freshness.Probe(root).Stale {
+					fmt.Fprint(cmd.ErrOrStderr(),
+						"\nbk: NOTE — the bead DB is newer than .beads/issues.jsonl, so the fix may\n"+
+							"already exist in the DB but isn't exported/committed yet. Run `bd sync`,\n"+
+							"commit the JSONL, and push again.\n")
+				}
 				silentExit(2)
 			}
 			return nil
