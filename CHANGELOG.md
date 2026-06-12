@@ -4,6 +4,31 @@ All user-visible changes to `bk`. `docs:`-prefixed commits are excluded
 from the auto-generated GitHub release notes per `.goreleaser.yaml` —
 this file captures user-facing additions explicitly.
 
+## v0.6.1
+
+### Fixed
+
+- **`bk progression new|add|list` were silent no-ops** (bkg-qv6): every
+  shell-out omitted the `bd` argv[0] (exec'ing binaries literally named
+  `create`/`list`/`update`/`show`) and the non-zero exit code was
+  swallowed, so `new` printed "created progression" with an empty id
+  while persisting nothing, `list` printed "no progressions." despite
+  existing progression beads, and `add` failed with
+  `parsing bd show output: unexpected end of JSON input`. All bd
+  failures now surface on stderr with a non-zero exit, `new` prints
+  (and requires) the created bead id, and `show --json` array output
+  from bd 0.47+ is parsed correctly.
+
+### Added
+
+- **JSONL freshness detection** (bkg-ckb): bd writes mutations to its
+  DB immediately but exports to `.beads/issues.jsonl` on a debounce, so
+  bk's read surfaces could report stale state right after a `bd update`.
+  `bk doctor` now flags this (YELLOW `jsonl-freshness`), `bk board`
+  shows a per-project stale banner, and a failing `bk guard beadspec`
+  hints when the fix may already exist in the DB and just needs
+  `bd sync` + commit + re-push. Detection only — bk never auto-flushes.
+
 ## v0.5.0
 
 ### Added
