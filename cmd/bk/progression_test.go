@@ -1,11 +1,185 @@
 package main
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
+	bkproject "github.com/theaichimera/beekeeper-go/internal/project"
 	"github.com/theaichimera/beekeeper-go/pkg/beadspec"
 )
+
+// stubBdForProgression swaps the injectable bd runner with fn,
+// recording every argv it receives, and restores the original on
+// cleanup. Regression harness for bkg-qv6: progression commands
+// must exec "bd" (argv[0]) and branch on rc, not err.
+func stubBdForProgression(t *testing.T, fn func(args []string, cwd string) (int, string, string, error)) *[][]string {
+	t.Helper()
+	var calls [][]string
+	orig := bkproject.BdRunner
+	bkproject.BdRunner = func(args []string, cwd string, _ time.Duration) (int, string, string, error) {
+		calls = append(calls, append([]string(nil), args...))
+		return fn(args, cwd)
+	}
+	t.Cleanup(func() { bkproject.BdRunner = orig })
+	return &calls
+}
+
+// contains reports whether xs has the exact element want.
+func argvHas(xs []string, want string) bool {
+	for _, x := range xs {
+		if x == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestProgressionNew_RunsBdAndPrintsID(t *testing.T) {
+	calls := stubBdForProgression(t, func(args []string, _ string) (int, string, string, error) {
+		return 0, "bkg-test1\n", "", nil
+	})
+	stdout, stderr, rc := runCmd(t, "progression", "new", "smoke topic")
+	if rc != 0 {
+		t.Fatalf("rc=%d want 0; stderr=%s", rc, stderr)
+	}
+	if len(*calls) != 1 {
+		t.Fatalf("bd calls=%d want 1: %v", len(*calls), *calls)
+	}
+	argv := (*calls)[0]
+	if len(argv) < 2 || argv[0] != "bd" || argv[1] != "create" {
+		t.Fatalf("argv = %v; want [bd create ...]", argv)
+	}
+	if !strings.Contains(stdout, `created progression bkg-test1: "smoke topic"`) {
+		t.Fatalf("stdout missing trimmed bead id: %q", stdout)
+	}
+}
+
+func TestProgressionNew_BdFailureExitsNonZero(t *testing.T) {
+	stubBdForProgression(t, func(args []string, _ string) (int, string, string, error) {
+		return 127, "", `exec: "bd": executable file not found in $PATH`, nil
+	})
+	_, stderr, rc := runCmd(t, "progression", "new", "topic")
+	if rc == 0 {
+		t.Fatalf("rc=0 want non-zero; stderr=%s", stderr)
+	}
+	if !strings.Contains(stderr, "bd create failed") {
+		t.Fatalf("stderr missing failure message: %q", stderr)
+	}
+	if !strings.Contains(stderr, "executable file not found") {
+		t.Fatalf("stderr missing bd's stderr: %q", stderr)
+	}
+}
+
+func TestProgressionNew_EmptyIDIsError(t *testing.T) {
+	// bd exiting 0 with no id on stdout is an unfalsifiable success;
+	// new must refuse to report a created progression without an id.
+	stubBdForProgression(t, func(args []string, _ string) (int, string, string, error) {
+		return 0, "", "", nil
+	})
+	stdout, stderr, rc := runCmd(t, "progression", "new", "topic")
+	if rc == 0 {
+		t.Fatalf("rc=0 want non-zero; stdout=%q", stdout)
+	}
+	if !strings.Contains(stderr, "no bead id") {
+		t.Fatalf("stderr missing empty-id message: %q", stderr)
+	}
+}
+
+func TestProgressionAdd_RunsBdShowThenUpdate(t *testing.T) {
+	desc := newProgressionBody("Topic", "2026-06-01")
+	showJSON, _ := json.Marshal(map[string]any{"description": desc})
+	calls := stubBdForProgression(t, func(args []string, _ string) (int, string, string, error) {
+		if argvHas(args, "show") {
+			return 0, string(showJSON), "", nil
+		}
+		return 0, "", "", nil
+	})
+	stdout, stderr, rc := runCmd(t, "progression", "add", "bkg-test1", "new", "insight")
+	if rc != 0 {
+		t.Fatalf("rc=%d want 0; stderr=%s", rc, stderr)
+	}
+	if len(*calls) != 2 {
+		t.Fatalf("bd calls=%d want 2 (show, update): %v", len(*calls), *calls)
+	}
+	show, update := (*calls)[0], (*calls)[1]
+	if show[0] != "bd" || show[1] != "show" {
+		t.Fatalf("show argv = %v; want [bd show ...]", show)
+	}
+	if update[0] != "bd" || update[1] != "update" {
+		t.Fatalf("update argv = %v; want [bd update ...]", update)
+	}
+	if !strings.Contains(stdout, "added deepening entry to bkg-test1.") {
+		t.Fatalf("stdout missing success message: %q", stdout)
+	}
+}
+
+func TestProgressionAdd_ShowArrayShape(t *testing.T) {
+	// bd 0.47+ emits `bd show --json` as a one-element array; add
+	// must still find the description (was masked by bkg-qv6).
+	desc := newProgressionBody("Topic", "2026-06-01")
+	showJSON, _ := json.Marshal([]map[string]any{{"id": "bkg-test1", "description": desc}})
+	stubBdForProgression(t, func(args []string, _ string) (int, string, string, error) {
+		if argvHas(args, "show") {
+			return 0, string(showJSON), "", nil
+		}
+		return 0, "", "", nil
+	})
+	stdout, stderr, rc := runCmd(t, "progression", "add", "bkg-test1", "entry")
+	if rc != 0 {
+		t.Fatalf("rc=%d want 0; stderr=%s", rc, stderr)
+	}
+	if !strings.Contains(stdout, "added deepening entry to bkg-test1.") {
+		t.Fatalf("stdout missing success message: %q", stdout)
+	}
+}
+
+func TestProgressionAdd_BdFailureExitsNonZero(t *testing.T) {
+	stubBdForProgression(t, func(args []string, _ string) (int, string, string, error) {
+		return 1, "", "no such issue: bkg-nope", nil
+	})
+	_, stderr, rc := runCmd(t, "progression", "add", "bkg-nope", "entry")
+	if rc == 0 {
+		t.Fatalf("rc=0 want non-zero; stderr=%s", stderr)
+	}
+	if !strings.Contains(stderr, "bd show bkg-nope failed") {
+		t.Fatalf("stderr missing failure message: %q", stderr)
+	}
+}
+
+func TestProgressionList_RunsBd(t *testing.T) {
+	calls := stubBdForProgression(t, func(args []string, _ string) (int, string, string, error) {
+		return 0, `[{"id":"p-1","title":"Topic arc","description":""}]`, "", nil
+	})
+	stdout, stderr, rc := runCmd(t, "progression", "list")
+	if rc != 0 {
+		t.Fatalf("rc=%d want 0; stderr=%s", rc, stderr)
+	}
+	if len(*calls) != 1 {
+		t.Fatalf("bd calls=%d want 1: %v", len(*calls), *calls)
+	}
+	argv := (*calls)[0]
+	if argv[0] != "bd" || argv[1] != "list" {
+		t.Fatalf("argv = %v; want [bd list ...]", argv)
+	}
+	if !strings.Contains(stdout, "p-1") || !strings.Contains(stdout, "Topic arc") {
+		t.Fatalf("stdout missing listed progression: %q", stdout)
+	}
+}
+
+func TestProgressionList_BdFailureExitsNonZero(t *testing.T) {
+	stubBdForProgression(t, func(args []string, _ string) (int, string, string, error) {
+		return 127, "", `exec: "bd": executable file not found in $PATH`, nil
+	})
+	_, stderr, rc := runCmd(t, "progression", "list")
+	if rc == 0 {
+		t.Fatalf("rc=0 want non-zero; stderr=%s", stderr)
+	}
+	if !strings.Contains(stderr, "bd list failed") {
+		t.Fatalf("stderr missing failure message: %q", stderr)
+	}
+}
 
 func TestNewProgressionBody_PassesSchema(t *testing.T) {
 	body := newProgressionBody("Beadspec rollout", "2026-06-05")

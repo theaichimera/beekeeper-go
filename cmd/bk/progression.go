@@ -50,16 +50,21 @@ func newProgressionNewCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			topic := strings.Join(args, " ")
 			body := newProgressionBody(topic, today())
-			_, stdout, stderr, err := bkproject.BdRun(
+			rc, stdout, stderr, err := runBd(
 				[]string{"create", topic, "-t", "task", "--labels", progressionLabel, "-d", body, "--silent"},
-				repo, 30*time.Second,
+				repo,
 			)
-			if err != nil {
-				fmt.Fprintf(cmd.ErrOrStderr(), "error: bd create failed: %s\n%s\n", err, stderr)
+			if err != nil || rc != 0 {
+				fmt.Fprintf(cmd.ErrOrStderr(), "error: bd create failed: rc=%d err=%v\n%s\n", rc, err, stderr)
 				silentExit(1)
 				return nil
 			}
 			id := strings.TrimSpace(stdout)
+			if id == "" {
+				fmt.Fprintln(cmd.ErrOrStderr(), "error: bd create exited 0 but returned no bead id")
+				silentExit(1)
+				return nil
+			}
 			fmt.Fprintf(cmd.OutOrStdout(), "created progression %s: %q\n", id, topic)
 			return nil
 		},
@@ -90,11 +95,9 @@ func newProgressionAddCmd() *cobra.Command {
 				return nil
 			}
 			updated := appendLogEntry(body, today(), entryType, message)
-			_, _, stderr, err := bkproject.BdRun(
-				[]string{"update", id, "-d", updated}, repo, 30*time.Second,
-			)
-			if err != nil {
-				fmt.Fprintf(cmd.ErrOrStderr(), "error: bd update failed: %s\n%s\n", err, stderr)
+			rc, _, stderr, err := runBd([]string{"update", id, "-d", updated}, repo)
+			if err != nil || rc != 0 {
+				fmt.Fprintf(cmd.ErrOrStderr(), "error: bd update failed: rc=%d err=%v\n%s\n", rc, err, stderr)
 				silentExit(1)
 				return nil
 			}
@@ -113,11 +116,9 @@ func newProgressionListCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List progression beads with their current-understanding one-liner.",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			_, stdout, stderr, err := bkproject.BdRun(
-				[]string{"list", "-l", progressionLabel, "--json"}, repo, 30*time.Second,
-			)
-			if err != nil {
-				fmt.Fprintf(cmd.ErrOrStderr(), "error: bd list failed: %s\n%s\n", err, stderr)
+			rc, stdout, stderr, err := runBd([]string{"list", "-l", progressionLabel, "--json"}, repo)
+			if err != nil || rc != 0 {
+				fmt.Fprintf(cmd.ErrOrStderr(), "error: bd list failed: rc=%d err=%v\n%s\n", rc, err, stderr)
 				silentExit(1)
 				return nil
 			}
@@ -138,6 +139,14 @@ func newProgressionListCmd() *cobra.Command {
 	}
 	c.Flags().StringVar(&repo, "repo", ".", "repo root")
 	return c
+}
+
+// runBd shells out to `bd <args...>` in repo via the injectable
+// project runner, prepending the "bd" argv[0] so call sites can't
+// forget it (execwrap executes args[0] as the binary — bkg-qv6).
+// Per the execwrap contract, callers must branch on rc, not err.
+func runBd(args []string, repo string) (int, string, string, error) {
+	return bkproject.BdRun(append([]string{"bd"}, args...), repo, 30*time.Second)
 }
 
 // --- pure helpers (no bd) ----------------------------------------------
@@ -248,15 +257,18 @@ type beadRow struct {
 
 // bdDescription fetches a single bead's description via `bd show --json`.
 func bdDescription(repo, id string) (string, error) {
-	_, stdout, stderr, err := bkproject.BdRun(
-		[]string{"show", id, "--json"}, repo, 30*time.Second,
-	)
-	if err != nil {
-		return "", fmt.Errorf("bd show %s failed: %w\n%s", id, err, stderr)
+	rc, stdout, stderr, err := runBd([]string{"show", id, "--json"}, repo)
+	if err != nil || rc != 0 {
+		return "", fmt.Errorf("bd show %s failed: rc=%d err=%v\n%s", id, rc, err, stderr)
 	}
 	var rec map[string]any
 	if err := json.Unmarshal([]byte(stdout), &rec); err != nil {
-		return "", fmt.Errorf("parsing bd show output: %w", err)
+		// Some bd versions (0.47+) emit a one-element array.
+		var arr []map[string]any
+		if err2 := json.Unmarshal([]byte(stdout), &arr); err2 != nil || len(arr) == 0 {
+			return "", fmt.Errorf("parsing bd show output: %w", err)
+		}
+		rec = arr[0]
 	}
 	// Some bd versions wrap the issue under "issue"/"data".
 	if inner, ok := rec["issue"].(map[string]any); ok {
